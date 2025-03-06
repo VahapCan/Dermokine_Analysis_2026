@@ -1,0 +1,232 @@
+# Working Script for the alpha KO - Exon
+
+from dna_features_viewer import GraphicFeature, GraphicRecord
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+
+# Change the font size
+plt.rcParams['font.size'] = 6
+
+# Convert the 'REFSEQ_SPAN' column to a list of tuples
+refseq_span_list_alpha = df_alpha['REFSEQ_SPAN'].apply(lambda x: tuple(map(int, x.split('-')))).tolist()
+refseq_span_list_beta = df_beta['REFSEQ_SPAN'].apply(lambda x: tuple(map(int, x.split('-')))).tolist()
+refseq_span_list_gamma = df_gamma['REFSEQ_SPAN'].apply(lambda x: tuple(map(int, x.split('-')))).tolist()
+
+# Get the 'COMP' column as a list
+comp_list_alpha = df_alpha['COMP'].tolist()
+comp_list_beta = df_beta['COMP'].tolist()
+comp_list_gamma = df_gamma['COMP'].tolist()
+
+# Create a colormap and normalize it
+cmap = plt.get_cmap('Pastel2')  # 'cividis' colormap is suitable for color-blind people
+norm = mcolors.Normalize(vmin=0, vmax=max(len(set(comp_list_alpha)), len(set(comp_list_beta)), len(set(comp_list_gamma))))
+
+# Create a dictionary mapping exon names to colors
+exon_to_color = {exon: cmap(norm(i)) for i, exon in enumerate(set(comp_list_alpha + comp_list_beta + comp_list_gamma))}
+
+# Create a list of GraphicFeature objects for the beta sequences
+features_beta = [
+    GraphicFeature(start=start, end=end, strand=1, color=exon_to_color[comp_list_beta[i]], label=comp_list_beta[i])
+    for i, (start, end) in enumerate(refseq_span_list_beta)
+]
+
+# Calculate the length of the beta sequence
+beta_sequence_length = max(end for start, end in refseq_span_list_beta)
+
+# Get the start and end of the last exon in the beta sequence
+last_beta_start, last_beta_end = refseq_span_list_beta[-1]
+
+# Get the start and end of the first exon in the beta sequence
+first_beta_start, first_beta_end = refseq_span_list_beta[0]
+
+# Create a list of GraphicFeature objects for the alpha sequences, adjusting the start and end of each exon to align with the last exon in the beta sequence
+features_alpha = [
+    GraphicFeature(start=start - refseq_span_list_alpha[-1][1] + last_beta_end, end=end - refseq_span_list_alpha[-1][1] + last_beta_end, strand=1, color=exon_to_color[comp_list_alpha[i]], label=comp_list_alpha[i])
+    for i, (start, end) in enumerate(refseq_span_list_alpha)
+]
+
+# Create a list of GraphicFeature objects for the gamma sequences, adjusting the start and end of each exon to align with the first exon in the beta sequence
+features_gamma = [
+    GraphicFeature(start=start - refseq_span_list_gamma[0][0] + first_beta_start, end=end - refseq_span_list_gamma[0][0] + first_beta_start, strand=1, color=exon_to_color[comp_list_gamma[i]], label=comp_list_gamma[i])
+    for i, (start, end) in enumerate(refseq_span_list_gamma)
+]
+
+# Create three GraphicRecord objects
+
+record_alpha = GraphicRecord(sequence_length=beta_sequence_length + 200, features=features_alpha)
+record_beta = GraphicRecord(sequence_length=beta_sequence_length + 200, features=features_beta)
+record_gamma = GraphicRecord(sequence_length=beta_sequence_length + 200, features=features_gamma)
+# Get the start and end of the last exon in the beta sequence
+last_beta_start, last_beta_end = refseq_span_list_beta[-1]
+
+# Get the start and end of the first exon in the beta sequence
+first_beta_start, first_beta_end = refseq_span_list_beta[0]
+
+# Convert the 'REFSEQ_SPAN' column of the gRNA_CytoSurge_4_alpha dataframe to a tuple
+gRNA_span = tuple(map(int, gRNA_CytoSurge_4_alpha['REFSEQ_SPAN'][0].split('-')))
+gRNA_span2 = tuple(map(int, gRNA_CytoSurge_5_alpha['REFSEQ_SPAN'][0].split('-')))
+
+# Get the 'COMP' column of the gRNA_CytoSurge_4_alpha dataframe as a string
+gRNA_comp = gRNA_CytoSurge_4_alpha['COMP'][0]
+gRNA_comp2 = gRNA_CytoSurge_5_alpha["COMP"][0]
+
+# Calculate the length of the gRNA_CytoSurge_4_alpha feature
+gRNA_length = gRNA_span[1] - gRNA_span[0]
+gRNA_length2 = gRNA_span2[1] - gRNA_span2[0]
+
+# Find the index of 'exon 17' in comp_list_alpha
+exon_17_index = comp_list_alpha.index('Exon 17')
+exon_17_index2 = comp_list_alpha.index('Exon 17')
+
+# Get the start and end of 'exon 17' in the alpha sequence
+exon_17_start, exon_17_end = refseq_span_list_alpha[exon_17_index]
+
+# Get the start and end of the last exon in the beta sequence
+last_beta_start, last_beta_end = refseq_span_list_beta[-1]
+
+# Calculate the offset between the start of 'exon 17' in the alpha sequence and the start of the last exon in the beta sequence
+offset = 1300
+
+# Adjust the start and end points of the gRNA_CytoSurge_4_alpha feature to align with 'exon 17' in the alpha sequence but adjusted to the beta sequence
+gRNA_start = exon_17_start + offset
+gRNA_end = exon_17_start + 20 + offset
+
+# Add the adjusted gRNA_CytoSurge_4_alpha feature to the alpha sequence
+features_alpha.append(GraphicFeature(start=1300, end=1320, strand=1, color='red', label="gRNA 2"))
+
+# Add the adjusted gRNA_CytoSurge_4_alpha feature to the alpha sequence
+features_alpha.append(GraphicFeature(start=1413, end=1433, strand=1, color='red', label="gRNA 3"))
+
+# Add the gRNA_DTU feature to the beta sequence
+features_beta.append(GraphicFeature(start=1300, end=1320, strand=1, color='red', label="gRNA 2"))
+
+# Add the gRNA_DTU feature to the beta sequence
+features_beta.append(GraphicFeature(start=1413, end=1433, strand=1, color='red', label="gRNA 3"))
+
+# Create a list of GraphicFeature objects for the alpha sequences
+features_alpha = [
+    GraphicFeature(start=start - refseq_span_list_alpha[-1][1] + last_beta_end, end=end - refseq_span_list_alpha[-1][1] + last_beta_end, strand=2, color=exon_to_color[comp_list_alpha[i]], label=comp_list_alpha[i])
+    for i, (start, end) in enumerate(refseq_span_list_alpha)
+]
+
+# Create a list of GraphicFeature objects for the gamma sequences
+features_gamma = [
+    GraphicFeature(start=start - refseq_span_list_gamma[0][0] + first_beta_start, end=end - refseq_span_list_gamma[0][0] + first_beta_start, strand=1, color=exon_to_color[comp_list_gamma[i]], label=comp_list_gamma[i])
+    for i, (start, end) in enumerate(refseq_span_list_gamma)
+]
+
+# Create three subplots and adjust the x-limits of the plots to align the sequences
+fig, axs = plt.subplots(3, 1, figsize=(15, 9))
+
+# Plot the alpha sequence without the background strand
+record_alpha.plot(ax=axs[0], plot_sequence=False)
+axs[0].set_xlim([-100, beta_sequence_length + 100])
+
+# Plot the beta sequence without the background strand
+record_beta.plot(ax=axs[1], plot_sequence=False)
+axs[1].set_xlim([-100, beta_sequence_length + 100])
+
+# Plot the gamma sequence without the background strand
+record_gamma.plot(ax=axs[2], plot_sequence=False)
+axs[2].set_xlim([-100, beta_sequence_length + 100])
+
+# Adjust the distance between the subplots
+plt.subplots_adjust(hspace=0.1)
+
+plt.show()
+
+
+
+
+########################### From here on is the script for the introns included plot ##########################################
+
+import seaborn as sns
+from Bio import SeqIO
+from dna_features_viewer import GraphicFeature, GraphicRecord
+from Bio.Seq import Seq
+import matplotlib.pyplot as plt
+
+# Define the sequence files and their corresponding exons files
+files = [
+    (r"C:\Users\vahcan\Downloads\DMKN_Alpha_DNA.fa", r"C:\Users\vahcan\Downloads\DMKN_alpha.exons.fa"),
+    (r"C:\Users\vahcan\Downloads\DMKN_Beta_DNA.fa", r"C:\Users\vahcan\Downloads\DMKN_beta.exons.fa"),
+    (r"C:\Users\vahcan\Downloads\DMKN_Gamma_DNA.fa", r"C:\Users\vahcan\Downloads\DMKN_gamma.exons.fa"),
+]
+
+# Define the gRNA sequences
+gRNA_sequences = [
+    "GGATACCCCGGAAACTCAGC",
+    str(Seq("CTCGGGATTGCACAAAGCCT").reverse_complement()),
+    "ACCCGTGGGCACTGAGACAA",
+]
+
+# Calculate the maximum sequence length
+max_length = max(len(SeqIO.read(file, "fasta").seq) for file, _ in files)
+
+# Create a subplot for each pair of sequence and exons files
+fig, axs = plt.subplots(len(files), 1, figsize=(10, len(files) * 2), gridspec_kw={'hspace': 0.1})
+
+# Read the beta sequence and its exons
+beta_sequence = SeqIO.read(files[1][0], "fasta").seq
+beta_exons = [exon.seq for exon in SeqIO.parse(files[1][1], "fasta")]
+
+# Define a larger palette of 20 distinct colors
+palette = sns.color_palette("hsv", 20)
+
+# Create a dictionary mapping exon sequences to colors
+exon_colors = {str(exon): palette[i % len(palette)] for i, exon in enumerate(beta_exons)}
+
+# Store the start and end positions of the beta exons
+beta_exon_positions = []
+for exon_sequence in beta_exons:
+    start = beta_sequence.find(exon_sequence)
+    if start != -1:  # if the exon sequence was found in the main sequence
+        end = start + len(exon_sequence)
+        beta_exon_positions.append((start, end))
+
+# Calculate the offset for the alpha sequence
+alpha_offset = beta_exon_positions[-1][1] - len(SeqIO.read(files[0][0], "fasta").seq)
+
+# Calculate the offset for the gamma sequence
+gamma_offset = beta_exon_positions[0][0]
+
+for ax, (sequence_file, exons_file) in zip(axs, files):
+    # Read the sequence file
+    sequence = SeqIO.read(sequence_file, "fasta").seq
+
+    # Read the exons file and create features
+    features = []
+    for exon_record in SeqIO.parse(exons_file, "fasta"):
+        exon_sequence = exon_record.seq
+        start = sequence.find(exon_sequence)
+        if start != -1:  # if the exon sequence was found in the main sequence
+            end = start + len(exon_sequence)
+            # If the sequence is the alpha sequence, adjust the start and end positions to align with the rightmost exon of the beta sequence
+            if sequence_file == files[0][0]:
+                start += alpha_offset
+                end += alpha_offset
+            # If the sequence is the gamma sequence, adjust the start and end positions to align with the start of the beta sequence
+            elif sequence_file == files[2][0]:
+                start += gamma_offset
+                end += gamma_offset
+            color = exon_colors.get(str(exon_sequence), "#000000")  # use a default color if the exon sequence is not in the dictionary
+            label = exon_record.id.replace(".", " ")  # replace the dot in the exon name with a space
+            features.append(GraphicFeature(start=start, end=end, strand=+1, color=color, label=label, linewidth=0.5))
+
+    # Add the gRNAs as new features
+    for i, gRNA_sequence in enumerate(gRNA_sequences, 1):
+        start = sequence.find(gRNA_sequence)
+        if start != -1:  # if the gRNA sequence was found in the main sequence
+            end = start + len(gRNA_sequence)
+            # If the sequence is the alpha sequence, adjust the start and end positions to align with the rightmost exon of the beta sequence
+            if sequence_file == files[0][0] and i > 1:
+                start += alpha_offset
+                end += alpha_offset
+            features.append(GraphicFeature(start=start, end=end, strand=+1, color="#FF00FF", label=f"gRNA {i}", linewidth=0.5))
+
+    # Create a GraphicRecord with the sequence length and plot it
+    record = GraphicRecord(sequence_length=max_length, features=features)
+    record.plot(ax=ax, with_ruler=sequence_file == files[-1][0])  # only display the ruler for the last sequence
+
+plt.tight_layout()
+plt.savefig(r"C:\Users\vahcan\Downloads\plot.svg", format="svg")

@@ -1,0 +1,476 @@
+---
+title: "Global_Proteome_analysis"
+author: "Vahap Canbay"
+date: "2024-06-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import data
+```{r cars}
+
+Proteome_protein_quant <- read_delim("O:/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/20240730_143924_20220201_VC_3D_PROTEOME_BG_AB_WT_v2_Report.tsv", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+
+# Define the new names
+new_names_cells <- c("[1] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_1_1.raw.PG.MS1Quantity" = "DMKN_BG_KO_1",
+               "[2] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_2_1.raw.PG.MS1Quantity" = "DMKN_BG_KO_2",
+               "[3] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_3_1.raw.PG.MS1Quantity" = "DMKN_BG_KO_3",
+               "[4] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_1_1.raw.PG.MS1Quantity" = "DMKN_AB_KO_1",
+               "[5] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_2_1.raw.PG.MS1Quantity" = "DMKN_AB_KO_2",
+               "[6] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_3_1.raw.PG.MS1Quantity" = "DMKN_AB_KO_3",
+               "[7] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_1_1.raw.PG.MS1Quantity" = "WT_1",
+               "[8] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_2_1.raw.PG.MS1Quantity" = "WT_2",
+               "[9] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_3_1.raw.PG.MS1Quantity" = "WT_3"
+               )
+
+# Convert the MS1 columns into numeric format
+MS1_columns_cells <- grep("raw", names(Proteome_protein_quant), value = TRUE)
+Proteome_protein_quant[MS1_columns_cells] <- lapply(Proteome_protein_quant[MS1_columns_cells], function(x) as.numeric(gsub(",", ".", x)))
+#Cells_protein_quant = Cells_protein_quant %>%
+#  mutate(across(ends_with("Quantity"), log10))
+
+# Rename the columns
+# Get the current column names
+current_names <- colnames(Proteome_protein_quant)
+for (i in seq_along(current_names)) {
+  if (current_names[i] %in% names(new_names_cells)) {
+    colnames(Proteome_protein_quant)[i] <- new_names_cells[current_names[i]]
+  }
+}
+```
+# Volcano Plot
+```{r}
+Proteome_protein_quant <- Proteome_protein_quant[complete.cases(Proteome_protein_quant[, grep("WT", colnames(Proteome_protein_quant))]), ]
+
+# Convert the data to a DGEList for use with edgeR/limma
+df <- Proteome_protein_quant
+df <- df[complete.cases(df[, grep("WT", colnames(df))]), ]
+
+df <- as.data.frame(df)
+df <- df[!is.na(df$PG.ProteinGroups), ]
+
+write.xlsx(df, "//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Main/Supplementary_Table_3_v2.xlsx")
+
+names(df) <- gsub(" ", ".", names(df))
+names(df) <- gsub("/", ".", names(df))
+df = na.omit(df)
+
+#df$unique_genes <- make.names(df$PG.Genes, unique = TRUE)
+#rownames(df) <- df$unique_genes
+
+counts <- df[, -(1:3)]
+rownames(counts) <- make.unique(df$PG.Genes)
+#counts = log2(counts)
+dge <- DGEList(counts = counts)
+
+# Normalize the data
+dge <- calcNormFactors(dge)
+
+# Design matrix
+#group <- factor(gsub("\\s\\d+$", "", colnames(dge))) This is if I dont change the names 
+
+group <- factor(gsub("(\\.KO)?\\_\\d+$", "", colnames(dge))) # THis is if I change the naming above
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+v <- voom(dge, design, plot=FALSE)
+
+contrasts <- makeContrasts(
+  BG_vs_WT = DMKN_BG_KO - WT,
+  AB_vs_WT = DMKN_AB_KO - WT,
+  levels = design
+)
+# Fit the model and perform the tests
+fit <- lmFit(v, design)
+fit2  = contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Extract the p-values and log fold changes (contrasts) from your fit2 object
+p_values <- fit2$p.value
+logFC <- fit2$coefficients
+# 
+# # Create a data frame to hold the p-values and log fold changes
+# df_plot <- data.frame(Contrast = colnames(logFC),
+#                  Gene = rownames(logFC),
+#                  logFC = as.vector(logFC),
+#                  p_value = as.vector(p_values))
+
+# Calculate -log10 of the p-values for the y-axis
+#df_plot$logp <- -log10(df_plot$p_value)
+
+# Create a list to hold the plots
+volcano_plots <- list()
+
+# Define thresholds
+pvalue_threshold <- -log10(0.05)
+logFC_threshold <- log2(1.5)
+
+
+# Convert the row names into a column
+df_plot <- data.frame(Gene = rownames(logFC), logFC = as.vector(logFC), p_value = as.vector(p_values))
+
+# Make sure the contrasts are properly assigned to each row
+df_plot$Contrast <- rep(colnames(logFC), each = nrow(logFC))
+
+
+# Convert matrices to long format data frames
+df_logFC <- as.data.frame(as.table(logFC))
+df_p_values <- as.data.frame(as.table(p_values))
+
+# Rename columns for clarity
+colnames(df_logFC) <- c("Gene", "Contrast", "logFC")
+colnames(df_p_values) <- c("Gene", "Contrast", "p_value")
+
+
+# Merge the two data frames by Gene and Contrast
+df_plot <- merge(df_logFC, df_p_values, by = c("Gene", "Contrast"))
+
+
+# Calculate -log10 of the p-values for the y-axis
+df_plot$logp <- -log10(df_plot$p_value)
+genes_to_highlight <- c("DMKN", "DSG1", "FLG2", "KRT10", "KRT14","ASPRV1", "KLK6","KLK7", "EGFR", "ITGA6","KRTDAP", "SBSN", "BLMH", "CDH1", "DSC1", "CTNND1", "CTNNB1")
+
+for (contrast in unique(df_plot$Contrast)) {
+    # Subset the data for the current contrast
+    df_sub <- df_plot[df_plot$Contrast == contrast, ]
+    
+    # Create a new column for color based on logFC
+    df_sub$color <- ifelse(df_sub$logp > pvalue_threshold & df_sub$logFC > logFC_threshold, "red", ifelse(df_sub$logp > pvalue_threshold & df_sub$logFC < -logFC_threshold, "blue", "grey"))
+    
+    # Create the volcano plot
+    Volcano_p <- ggplot(df_sub, aes(x = logFC, y = logp, color = color)) +
+        geom_point(alpha = 0.4, size = 1.75) +
+        geom_hline(yintercept = pvalue_threshold, linetype = "dashed") +
+        geom_vline(xintercept = c(-logFC_threshold, logFC_threshold), linetype = "dashed") +
+        theme_minimal() +
+        scale_color_identity() + 
+        geom_label_repel(data = subset(df_sub, Gene %in% genes_to_highlight), aes(label = Gene), size = 3, color = "black",label.size = NA, fill = NA, segment.color = "black",segment.size = 0.5,box.padding = 1.5, fontface = "bold", nudge_x = c(-3,3)) +
+        ggtitle(paste("Volcano plot for", contrast)) +
+        xlab("Log2 fold change") +
+        ylab("-Log10 p-value") +
+        coord_cartesian(xlim = c(min(df_plot$logFC), max(df_plot$logFC)), ylim = c(0, max(df_plot$logp)))
+    
+    # Add the plot to the list
+    volcano_plots[[contrast]] <- Volcano_p
+}
+
+
+
+pdf("//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/Volcano_Plots_KO.pdf")
+grid.arrange(grobs = volcano_plots, ncol = 2)
+dev.off()
+```
+# Extract sig Hits from LIMMA
+```{r}
+# Define the thresholds
+pvalue_threshold <- -log10(0.05) # Adjust the p-value threshold as needed
+logFC_threshold <- 0.58 # Adjust the log fold change threshold as needed
+
+# Initialize lists to store the top candidates
+top_sig_increase <- list()
+top_sig_decrease <- list()
+
+for (contrast in unique(df_plot$Contrast)) {
+  # Subset the data for the current contrast
+  df_sub <- df_plot[df_plot$Contrast == contrast, ]
+  
+  # Sort by logp value in descending order to get the most significant genes on top
+  df_sub <- df_sub[order(-df_sub$logp),]
+  
+  # Extract top 20 genes with significant increase
+  top_sig_increase[[contrast]] <- head(df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC > logFC_threshold], 20)
+  
+  # Extract top 20 genes with significant decrease
+  top_sig_decrease[[contrast]] <- head(df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC < -logFC_threshold], 20)
+}
+
+# Now you have two lists: top_sig_increase and top_sig_decrease
+# containing the top 20 candidates for each contrast
+
+
+sig_increase <- list()
+A <- list()
+
+# Loop through each contrast
+for (contrast in unique(df_plot$Contrast)) {
+    # Subset the data for the current contrast
+    df_sub <- df_plot[df_plot$Contrast == contrast, ]
+    
+    # Extract genes with significant increase and decrease
+    sig_increase[[contrast]] <- df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC > logFC_threshold]
+    sig_decrease[[contrast]] <- df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC < -logFC_threshold]
+}
+
+
+sig_increase <- lapply(sig_increase, as.character)
+
+# Map gene symbols to Entrez IDs
+sig_increase_entrez <- lapply(sig_increase, function(genes) {
+  suppressWarnings(
+    mapIds(org.Hs.eg.db,
+           keys = genes,
+           column = "ENTREZID",
+           keytype = "SYMBOL",
+           multiVals = "first")
+  )
+})
+
+
+sig_decrease <- lapply(sig_decrease, as.character)
+
+# Map gene symbols to Entrez IDs
+sig_decrease_entrez <- lapply(sig_decrease, function(genes) {
+  suppressWarnings(
+    mapIds(org.Hs.eg.db,
+           keys = genes,
+           column = "ENTREZID",
+           keytype = "SYMBOL",
+           multiVals = "first")
+  )
+})
+# Transform each character vector in the list and collapse into a comma-separated string
+sig_increase_entrez_transformed <- lapply(sig_increase_entrez, function(x) {
+  x <- gsub(",", " ", x)  # Replace commas with spaces
+  x <- gsub(";", " ", x)  # Replace semicolons with spaces
+  paste(x, collapse = ", ")  # Collapse the vector into a comma-separated string
+})
+# Convert the list to a data frame with 'Name' and 'Genes' columns
+df_sig_increase <- data.frame(Name = names(sig_increase_entrez_transformed), 
+                 Genes = sig_increase_entrez_transformed, 
+                 stringsAsFactors = F)
+
+# Write the DataFrame to a text file
+write.table(df_sig_increase, file = "O:/Public/Proteomics-Protease/Vahap/EVs/First_Analysis/df_Cells_sig_increase.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+write.xlsx(df_sig_increase, "//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/df_KO_sig_increase.xlsx")
+
+# Transform each character vector in the list and collapse into a comma-separated string
+sig_decrease_entrez_transformed <- lapply(sig_decrease_entrez, function(x) {
+  x <- gsub(",", " ", x)  # Replace commas with spaces
+  x <- gsub(";", " ", x)  # Replace semicolons with spaces
+  paste(x, collapse = ", ")  # Collapse the vector into a comma-separated string
+})
+
+# Convert the list to a data frame with 'Name' and 'Genes' columns
+df_sig_decrease <- data.frame(Name = names(sig_decrease_entrez_transformed), 
+                 Genes = sig_decrease_entrez_transformed, 
+                 stringsAsFactors = FALSE)
+write.table(df_sig_decrease, file = "O:/Public/Proteomics-Protease/Vahap/EVs/First_Analysis/df_Cells_sig_decrease.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+#Convert to excel
+output_for_GO_increased = t(do.call(rbind, sig_increase))
+output_for_GO_decreased = t(do.call(rbind, sig_decrease))
+
+write.csv(output_for_GO_increased, "//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/df_Cells_sig_increase.csv")
+write.csv(output_for_GO_decreased, "//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/df_Cells_sig_decrease.csv")
+```
+
+
+# Heatmap
+```{r}
+# Convert the data to a DGEList for use with edgeR/limma
+df_V2 <- Proteome_protein_quant
+df_V2 <- df_V2[complete.cases(df_V2[, grep("WT", colnames(df_V2))]), ]
+
+df_V2 <- as.data.frame(df_V2)
+df_V2 <- df_V2[!is.na(df_V2$PG.Genes), ]
+names(df_V2) <- gsub(" ", ".", names(df_V2))
+names(df_V2) <- gsub("/", ".", names(df_V2))
+df_V2 = na.omit(df_V2)
+#df_V2$unique_genes <- make.names(df_V2$PG.Genes, unique = TRUE)
+#rownames(df_V2) <- df_V2$unique_genes
+
+counts <- df_V2[, -(1:3)]
+rownames(counts) <- make.unique(df_V2$PG.Genes)
+#counts = log2(counts)
+dge_v2 <- DGEList(counts = counts)
+
+# Normalize the data
+dge_v2 <- calcNormFactors(dge_v2)
+
+# Design matrix
+#group <- factor(gsub("\\s\\d+$", "", colnames(dge))) This is if I dont change the names 
+# Define your factor
+group_v2 <- factor(gsub("(\\.KO)?\\_\\d+$", "", colnames(dge_v2))) # This is if you change the naming above
+
+# Create the design matrix
+design_v2 <- model.matrix(~0 + group_v2)
+colnames(design_v2) <- levels(group_v2)
+
+# Estimate dispersion
+dge_v2 <- estimateDisp(dge_v2, design_v2)
+v_v2 <- voom(dge_v2, design_v2, plot=FALSE)
+
+# Define contrasts
+contrasts_v2 <- makeContrasts(
+  BG_vs_WT = DMKN_BG_KO - WT,
+  AB_vs_WT = DMKN_AB_KO - WT,
+  levels = design
+)
+
+# Fit the model and perform the tests
+fit_v2 <- lmFit(v_v2, design_v2)
+fit2_v2  = contrasts.fit(fit_v2, contrasts_v2)
+fit2_v2 <- eBayes(fit2_v2)
+
+# Extract the p-values and log fold changes (contrasts) from your fit2 object
+p_values_v2 <- fit2_v2$p.value
+logFC_v2 <- fit2_v2$coefficients
+
+# Get the top genes for each contrast
+top_genes_v2 <- topTable(fit2_v2, adjust="BH")
+
+
+# Create a Venn diagram showing numbers of genes significant in each comparison
+#vennDiagram(results)
+
+# Find the top 30 genes which vary between the three RNA targets in any way
+#top_30_genes <- topTable(fit2_v2, number=30)
+
+
+# Convert t-statistics to z-scores
+
+significant_genes <- which(fit2_v2$F.p.value < 0.05)
+fit2_significant <- fit2_v2[significant_genes, ]
+z_scores <- zscoreT(fit2_significant$t, df=fit2_significant$df.residual)
+
+# Get the gene names from z_scores
+z_score_genes <- rownames(z_scores)
+
+# Filter Exosome_protein_quant_V2 to only keep rows where PG.Genes is in z_score_genes
+Proteome_protein_quant_V2_filtered <- Proteome_protein_quant[Proteome_protein_quant$PG.Genes %in% z_score_genes, ]
+Proteome_protein_quant_V2_filtered = as.data.frame(Proteome_protein_quant_V2_filtered)
+rownames(Proteome_protein_quant_V2_filtered) = Proteome_protein_quant_V2_filtered$PG.Genes
+Proteome_protein_quant_V2_filtered = Proteome_protein_quant_V2_filtered[4:12]
+original_colnames <- colnames(Proteome_protein_quant_V2_filtered)
+Proteome_protein_quant_V2_filtered_zscore <-t(apply(Proteome_protein_quant_V2_filtered,1,scale))
+colnames(Proteome_protein_quant_V2_filtered_zscore) <- original_colnames
+
+
+annotation_colors = list(
+  Condition = c("WT" = "blue", 
+                "DMKN BG KO" = "green", 
+                "DMKN AB KO" = "red"))
+annotation_df <- data.frame(
+  Condition = factor(rep(c("WT", "DMKN BG KO", "DMKN AB KO"), each = 3))
+)
+rownames(annotation_df) <- colnames(Proteome_protein_quant_V2_filtered_zscore)
+pdf("//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/20220201_VC_3D_PROTEOME_BG_AB_WT_v2_Protein_Quant_sig_ANOVA.pdf", width= 7, height=7)
+print(pheatmap::pheatmap((Proteome_protein_quant_V2_filtered_zscore), 
+                   cluster_rows = T, 
+                   cluster_cols = F, 
+                   show_rownames = F,
+                   show_colnames = F, 
+                   legend = TRUE,legend_breaks = c(max(Proteome_protein_quant_V2_filtered_zscore),-2,-1,0,1,2,3),
+                   legend_labels = c("Z-Score","-2", "-1", "0", "1", "2", "3"),
+                   clustering_method = "ward.D2",
+                   angle_col = 45, 
+                   fontsize = 6,
+                   show_col_dendrogram = F,
+                   show_row_dendrogram = F,
+                   annotation_col = annotation_df,
+                   annotation_colors = annotation_colors))
+dev.off()
+pdf("//ait-pdfs.win.dtu.dk/Department/Bio/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/20220201_VC_3D_PROTEOME_BG_AB_WT_v2_Protein_Quant_sig_ANOVA.pdf", width= 7, height=7)
+print(pheatmap::pheatmap((Proteome_protein_quant_V2_filtered_zscore), 
+                   cluster_rows = T, 
+                   cluster_cols = F, 
+                   show_rownames = F,
+                   show_colnames = F, 
+                   legend = TRUE, legend_breaks = c(max(Proteome_protein_quant_V2_filtered_zscore),-2,-1,0,1,2,3),
+                   legend_labels = c("Z-Score","-2", "-1", "0", "1", "2", "3"),
+                   clustering_method = "ward.D2",
+                   angle_col = 45, 
+                   fontsize = 10,
+                   show_col_dendrogram = F,
+                   show_row_dendrogram = F,
+                   annotation_col = annotation_df,
+                   annotation_colors = annotation_colors))
+dev.off()
+#############
+write.xlsx(fit2_significant$coefficients, file = "O:/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/20220201_VC_3D_PROTEOME_BG_AB_WT_v2_Protein_Quant_sig_ANOVA.xlsx")
+
+
+#Extract cluster
+heatmap_obj <- pheatmap(Proteome_protein_quant_V2_filtered_zscore, 
+                        cluster_rows = TRUE, 
+                        cluster_cols = FALSE, 
+                        show_rownames = FALSE,
+                        show_colnames = FALSE, 
+                        legend = TRUE, 
+                        legend_breaks = c(max(Proteome_protein_quant_V2_filtered_zscore), -2, -1, 0, 1, 2, 3),
+                        legend_labels = c("Z-Score", "-2", "-1", "0", "1", "2", "3"),
+                        clustering_method = "ward.D2",
+                        angle_col = 45, 
+                        fontsize = 10,
+                        show_col_dendrogram = FALSE,
+                        show_row_dendrogram = FALSE,
+                        annotation_col = annotation_df,
+                        annotation_colors = annotation_colors)
+
+# Extract row clusters
+row_clusters <- cutree(heatmap_obj$tree_row, k = 6)  # Replace 'number_of_clusters' with the actual number
+
+# Create a list to store data frames for each cluster
+cluster_tables <- list()
+
+# Loop through each cluster and create a table
+for (i in unique(row_clusters)) {
+  cluster_tables[[paste0("Cluster_", i)]] <- Proteome_protein_quant_V2_filtered_zscore[row_clusters == i, ]
+}
+
+# Define the order of clusters based on your column names
+ordered_cluster_names <- paste0("Cluster_", seq_len(max(row_clusters)))
+
+# Define the order within each cluster
+column_order <- c("WT_1", "WT_2", "WT_3", "DMKN_BG_KO_1", "DMKN_BG_KO_2", "DMKN_BG_KO_3", "DMKN_AB_KO_1", "DMKN_AB_KO_2", "DMKN_AB_KO_3")
+
+# Print each cluster table in the specified order
+for (cluster_name in ordered_cluster_names) {
+  cat("\n", cluster_name, "\n")
+  cluster_data <- cluster_tables[[paste0("Cluster_", which(ordered_cluster_names == cluster_name))]]
+  ordered_data <- cluster_data[, column_order[column_order %in% colnames(cluster_data)]]
+  print(ordered_data)
+  pheatmap(ordered_data, cluster_cols = F)
+}
+
+library(openxlsx)
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Add a worksheet
+addWorksheet(wb, "Cluster Row Names")
+
+# Initialize a list to store row names
+row_names_list <- list()
+
+# Loop through each cluster and collect row names
+for (i in seq_along(ordered_cluster_names)) {
+  cluster_name <- ordered_cluster_names[i]
+  cluster_data <- cluster_tables[[paste0("Cluster_", which(ordered_cluster_names == cluster_name))]]
+  row_names <- rownames(cluster_data)
+  
+  # Store row names in the list
+  row_names_list[[paste0("Cluster ", i)]] <- row_names
+}
+
+# Find the maximum number of rows
+max_rows <- max(sapply(row_names_list, length))
+
+# Write row names to the worksheet
+for (i in seq_along(row_names_list)) {
+  col_name <- names(row_names_list)[i]
+  writeData(wb, "Cluster Row Names", col_name, startCol = i, startRow = 1)
+  writeData(wb, "Cluster Row Names", row_names_list[[i]], startCol = i, startRow = 2)
+}
+
+# Save the workbook
+saveWorkbook(wb, "O:/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/Cluster_Row_Names.xlsx", overwrite = TRUE)
+```
