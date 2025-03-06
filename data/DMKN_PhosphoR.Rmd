@@ -1,0 +1,4106 @@
+---
+title: "DMKN_PhosphoR"
+author: "Vahap Canbay"
+date: "2024-02-13"
+output: pdf_document
+---
+
+
+
+
+#Packages
+```{r Packages, message=FALSE, warning=FALSE}
+  gc()
+  load_or_install_packages <- function(packages) {
+    if (!requireNamespace("BiocManager", quietly = TRUE)) {
+      install.packages("BiocManager")
+    }
+  
+    for (pkg in packages) {
+      if (!requireNamespace(pkg, quietly = TRUE)) {
+        if (pkg %in% rownames(installed.packages())) {
+          warning(pkg, " is not available")
+        } else {
+          BiocManager::install(pkg, ask = FALSE)
+        }
+      }
+      require(pkg, character.only = TRUE, quietly = TRUE)
+    }
+  }
+  packages <- c("ggplot2", "dplyr", "tidyverse", "tidyr", "ggupset", "corrplot", "ggvenn", "limma", "graphics", "directPA", "reactome.db", "org.Hs.eg.db", "SummarizedExperiment", "PhosR", "calibrate", "ggpubr", "GGally", "network", "annotate", "stats4", "methods", "datasets", "gridExtra", "venn", "UpSetR", "grid", "reshape2", "extrafont", "PerformanceAnalytics", "xts", "zoo", "ClueR", "parallel", "e1071", "lubridate", "forcats", "stringr", "purrr", "readr", "tibble", "GenomicRanges", "GenomeInfoDb", "MatrixGenerics", "matrixStats", "XML", "AnnotationDbi", "IRanges", "S4Vectors", "Biobase", "BiocGenerics", "stats4", "calibrate", "MASS", "svglite", "pheatmap", "ggplotify","doParallel", "enrichplot" ,"clusterProfiler", "ggrepel", "devtools", "volcano3D","edgeR","RColorBrewer","readxl","ggVennDiagram", "ggbeeswarm", "rlang", "xtable")
+  load_or_install_packages(packages)
+  
+  data(PhosphoSitePlus)
+  Sys.setenv(LANG = "en")
+```
+
+
+First Import the data table. The data is a quant file from Spectronaut with no localization filter and in long format
+#Import
+```{r eval=FALSE, include=FALSE}
+
+uniprot.proteome_Human <- read.delim("uniprot-proteome_UP000005640+reviewed_yes.fasta", header=FALSE)
+
+
+
+phos_peptides_DMKN_noLOCFilter_Qvalue0_01 = read.delim2("20221127_HRMS1_DIA_DMKN_KO_ENDO_RESCUE_Rstudio_Vcan_report.tsv")
+
+phos_quant_prePerseus_filtered_Qvalue0_01 = phos_peptides_DMKN_noLOCFilter_Qvalue0_01[phos_peptides_DMKN_noLOCFilter_Qvalue0_01$FG.ShapeQualityScore..MS1. > 0.6, ]
+
+write.table(phos_quant_prePerseus_filtered_Qvalue0_01, file = "20221127_HRMS1_DIA_DMKN_KO_ENDO_RESCUE_Rstudio_Vcan_report_PeakShape_prePerseus.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote=FALSE)
+
+phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4 <- read_delim("20221127_HRMS1_DIA_DMKN_KO_ENDO_RESCUE_Rstudio_Vcan_report_PeakShape_PeptideCollapse.tsv", 
+    delim = "\t", escape_double = FALSE, 
+    comment = "#", trim_ws = TRUE,show_col_types = FALSE)
+final_phos_locFILTER_shapeFILTER = phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4
+
+Keratinocyte_Phosphoproteome_2024 = phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4
+
+global_PG_QUANT_V2<- read.csv2("20221215_HRMS1_DIA_DMKN_KO_ENDO_RESCUE_global_Report.csv")
+```
+
+reformat_fasta_df <- function(fasta_df) {
+  reformatted_lines <- c()
+  current_sequence <- ""
+  
+  for (i in 1:nrow(fasta_df)) {
+    line <- as.character(fasta_df[i, 1])
+    if (!is.na(line)) {
+      if (startsWith(line, ">")) {
+        if (nchar(current_sequence) > 0) {
+          reformatted_lines <- c(reformatted_lines, current_sequence)
+          current_sequence <- ""
+        }
+        reformatted_lines <- c(reformatted_lines, line)
+      } else {
+        current_sequence <- paste0(current_sequence, line)
+      }
+    }
+  }} 
+  
+
+fasta_to_named_list <- function(fasta_lines) {
+  named_list <- list()
+  current_header <- ""
+
+  for (line in fasta_lines) {
+    if (startsWith(line, ">")) {
+      uniprot_id <- sub("^.*\\|(.+?)\\|.*$", "\\1", line)
+      gene_id <- sub("^.*GN=(\\S+).*?$", "\\1", line)
+      current_header <- paste(uniprot_id, gene_id, sep = ";")
+    } else {
+      named_list[[current_header]] <- line
+    }
+  }
+
+  return(named_list)
+}
+
+extract_flanking_seq <- function(named_FASTA, rownames_ppe) {
+  updated_rownames <- c()
+
+  for (rowname in rownames_ppe) {
+    split_name <- strsplit(rowname, ";")[[1]]
+    
+    # Remove the first and third terms if there are more than 4 terms
+    if (length(split_name) > 4) {
+      split_name <- split_name[-c(1, 3)]
+    }
+    # Remove any terms after the third semicolon
+    split_name <- split_name[1:4]
+    
+    rowname <- remove_terms_after_third_semicolon(rowname)
+    gene_id <- split_name[2]
+    position <- as.integer(gsub("\\D", "", split_name[3]))
+    matches <- grep(paste0(".*;", gene_id, "$"), names(named_FASTA), value = TRUE)
+
+    if (length(matches) > 0) {
+      protein_seq <- named_FASTA[matches[1]]
+
+      # Correct the position indexing
+      start <- max(1, position - 7)
+      stop <- min(nchar(protein_seq), position + 7)
+
+      flanking_seq <- substr(protein_seq, start, stop)
+      new_name <- paste(split_name[1], split_name[2], split_name[3], flanking_seq, sep = ";")
+      updated_rownames <- c(updated_rownames, new_name)
+    } else {
+      updated_rownames <- c(updated_rownames, rowname)
+    }
+  }
+
+  return(updated_rownames)
+}
+
+remove_terms_after_third_semicolon <- function(rowname) {
+  split_name <- strsplit(rowname, ";")[[1]]
+  new_name <- paste(split_name[1:4], collapse = ";")
+  return(new_name)
+}
+
+
+#Functions
+```{r message=FALSE, warning=FALSE, include=FALSE}
+generate_volcano_plot <- function(df) {
+  # Extract the name of the data frame
+  df_name <- deparse(substitute(df))
+
+  # Define the title based on the name of the data frame
+  title <- switch(df_name,
+                  "results_df_CS_Rescue_sorted" = "DMKN\U03B1\U03B2-/- Rescue vs DMKN\U03B1\U03B2-/- Endogenous",
+                  "results_df_CS_Endogenous_sorted" = "WT vs DMKN\U03B1\U03B2-/-",
+                  "results_df_DTU_Rescue_sorted" = "DMKN\U03B2\U03B3-/- Rescue vs DMKN\U03B2\U03B3-/- Endogenous",
+                  "results_df_DTU_Endogenous_sorted" = "WT vs DMKN\U03B2\U03B3-/-",
+                  "results_df_WT_Endogenous_sorted" = "WT Rescue vs WT endogenous",
+                  "Unknown data frame")
+
+    log2FC_threshold = log2(1.5)
+    point_color = "black"
+    hl.col.down = "blue"
+    hl.col.up = "red"
+  # Generate the volcano plot
+  volcano_plot <- ggplot(df, aes(x = diff_coeff, y = -log10(phos_pvals_significant), label = phos_ID)) +
+    geom_vline(xintercept = log2FC_threshold, linetype = 3) + geom_vline(xintercept = -log2FC_threshold, linetype = 3) +
+    geom_point(aes(color = ifelse(diff_coeff >= log2FC_threshold, hl.col.up, ifelse(diff_coeff <= -log2FC_threshold, hl.col.down, point_color)))) +
+    scale_alpha_identity(guide=FALSE) +
+    scale_color_identity(guide = FALSE) +
+    ylim(0, 3) + xlim(-3, 3) +
+    labs(x = "Difference in Coefficients (Log2 fold change)", y = "-Log10(limma moderated p value)") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill = 'transparent'),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1),
+          text = element_text(size = 12) ,
+          legend.position = "none") +
+    geom_label_repel(aes(label = phos_ID, fill = ifelse(startsWith(phos_ID, "CTNND1"), "orange", "black")), 
+                 nudge_y = 0.25, nudge_x = .15, segment.curvature = -1e-20,
+                 arrow = arrow(length = unit(0.015, "npc")),
+                 box.padding   = 0.35, max.overlaps = Inf,
+                 point.padding = 0.5,
+                 segment.color = 'grey50', size  = 2)+
+    ggtitle(paste("Difference in Log2 Fold Change of \nPhosphorylated Peptide and Protein \nAbundance", title))
+
+  return(volcano_plot)
+}
+
+
+volcano_plot_ggplot_multicol_overlay <- function(fit, coefs = 1L, style = "p-value", 
+                                                 highlight = 0L, names = rownames(fit$coef), 
+                                                 hl.col.up = "red", hl.col.down = "blue", 
+                                                 point_color = "darkgray", xlab = "Log2 Fold Change",
+                                                 ylab = NULL, pch = 16, cex = 0.5, 
+                                                 p_value_threshold = 0.05, log2FC_threshold = 1, ...) {
+  if (!is(fit, "MArrayLM")) 
+    stop("fit must be an MArrayLM")
+  
+  style <- match.arg(tolower(style), c("p-value", "b-statistic"))
+  
+  data_list <- list()
+  
+  for (coef in coefs) {
+    x <- as.matrix(fit$coef)[, coef]
+    
+    if (style == "p-value") {
+      if (is.null(fit$p.value)) 
+        stop("No p-values found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$p.value)[, coef]
+      y <- -log10(y)
+      if (is.null(ylab)) 
+        ylab = "-log10(limma moderated p value)"
+    }
+    else {
+      if (is.null(fit$lods)) 
+        stop("No B-statistics found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$lods)[, coef]
+      if (is.null(ylab)) 
+        ylab = "Log Odds of Differential Expression"
+    }
+    
+    if (is.null(names)) {
+      names <- 1:length(x)
+    }
+    
+    coef_data <- data.frame(x = x, y = y, names = names, coef = factor(coef))
+    data_list[[as.character(coef)]] <- coef_data
+  }
+  
+    # ... (rest of your function) ...
+  
+  data <- do.call(rbind, data_list)
+  
+  p <- ggplot(data, aes(x, y)) + labs(x = xlab, y = ylab)
+  
+  # Manually specify each comparison
+  coef1_data <- data[data$coef == coefs[1],]
+  coef2_data <- data[data$coef == coefs[2],]
+  
+  # Determine labels based on the coefficients provided
+labels <- c()
+for (coef in coefs) {
+    coef_name <- colnames(fit$coef)[coef]
+    labels <- c(labels, paste0(coef_name, " up"))
+}
+labels <- c(labels, "Not significant")
+for (coef in coefs) {
+    coef_name <- colnames(fit$coef)[coef]
+    labels <- c(labels, paste0(coef_name, " down"))
+}
+  
+  
+  
+  p <- p + geom_point(data = coef1_data, aes(color = ifelse(x >= log2FC_threshold, "blue", 
+                                                            ifelse(x <= -log2FC_threshold, "darkred",
+                                                                   point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >=-log10(p_value_threshold), 1, 0.01)), 
+                      shape = pch, size = cex)
+  p <- p + geom_point(data = coef2_data, aes(color = ifelse(x >= log2FC_threshold, "cyan", 
+                                                            ifelse(x <= -log2FC_threshold, "pink", 
+                                                                   point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >= -log10(p_value_threshold), 1, 0.01)), 
+                      shape = 18, size = cex)
+  # Getting 2 colors from each palette
+red_spectrum <- brewer.pal(9, "YlOrRd")[c(8, 5)]  # Choosing darker and somewhat lighter reds
+blue_spectrum <- brewer.pal(9, "GnBu")[c(8, 5)]  # Choosing darker and somewhat lighter blues
+
+
+  # ... (rest of your function) ...
+  color_order <- c(red_spectrum[1], red_spectrum[2], "darkgrey", blue_spectrum[1], blue_spectrum[2])
+  shape_order  <- c("pch", 18, "pch", "pch", 18)
+  p = p + scale_alpha_identity(guide="none") + scale_color_manual(values = color_order, labels =labels,  name = "Comparisons")  + scale_shape_manual(values = shape_order, labels = labels) +
+   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill='transparent'),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1),legend.text=element_text(size=10),
+          text = element_text(size = 12),legend.position="bottom") + 
+    guides(colour = guide_legend(ncol = 2,title.position="top", title.hjust = 0.5)) + ggtitle("Comparison of phosphorylation \nsite abundances") 
+nudge_directions <- c(0.3, -0.3)  # replace these with your preferred values
+
+
+  print(p)
+  invisible()
+  return(p)
+}
+
+volcano_plot_ggplot_multicol_overlay_CS <- function(fit, coefs = 1L, style = "p-value", 
+                                                 highlight = 0L, names = rownames(fit$coef), 
+                                                 hl.col.up = "red", hl.col.down = "blue", 
+                                                 point_color = "darkgray", xlab = "Log2 Fold Change",
+                                                 ylab = NULL, pch = 16, cex = 0.5, 
+                                                 p_value_threshold = 0.05, log2FC_threshold = 1, ...) {
+  if (!is(fit, "MArrayLM")) 
+    stop("fit must be an MArrayLM")
+  
+  style <- match.arg(tolower(style), c("p-value", "b-statistic"))
+  
+  data_list <- list()
+  
+  for (coef in coefs) {
+    x <- as.matrix(fit$coef)[, coef]
+    
+    if (style == "p-value") {
+      if (is.null(fit$p.value)) 
+        stop("No p-values found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$p.value)[, coef]
+      y <- -log10(y)
+      if (is.null(ylab)) 
+        ylab = "-log10(limma moderated p value)"
+    }
+    else {
+      if (is.null(fit$lods)) 
+        stop("No B-statistics found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$lods)[, coef]
+      if (is.null(ylab)) 
+        ylab = "Log Odds of Differential Expression"
+    }
+    
+    if (is.null(names)) {
+      names <- 1:length(x)
+    }
+    
+    coef_data <- data.frame(x = x, y = y, names = names, coef = factor(coef))
+    data_list[[as.character(coef)]] <- coef_data
+  }
+  
+    # ... (rest of your function) ...
+  
+  data <- do.call(rbind, data_list)
+  
+  p <- ggplot(data, aes(x, y)) + labs(x = xlab, y = ylab)
+  
+  # Manually specify each comparison
+  coef1_data <- data[data$coef == coefs[1],]
+  coef2_data <- data[data$coef == coefs[2],]
+  
+  # Determine labels based on the coefficients provided
+labels <- c()
+for (coef in coefs) {
+    coef_name <- colnames(fit$coef)[coef]
+    labels <- c(labels, paste0(coef_name, " up"))
+}
+labels <- c(labels, "Not significant")
+for (coef in coefs) {
+    coef_name <- colnames(fit$coef)[coef]
+    labels <- c(labels, paste0(coef_name, " down"))
+}
+  
+  
+  
+  p <- p + geom_point(data = coef1_data, aes(color = ifelse(x >= log2FC_threshold, "blue", 
+                                                            ifelse(x <= -log2FC_threshold, "darkred",
+                                                                   point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >=-log10(p_value_threshold), 1, 0.01)), 
+                      shape = pch, size = cex)
+  p <- p + geom_point(data = coef2_data, aes(color = ifelse(x >= log2FC_threshold, "cyan", 
+                                                            ifelse(x <= -log2FC_threshold, "pink", 
+                                                                   point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >= -log10(p_value_threshold), 1, 0.01)), 
+                      shape = 18, size = cex)
+  # Getting 2 colors from each palette
+red_spectrum <- brewer.pal(9, "YlOrRd")[c(8, 5)]  # Choosing darker and somewhat lighter reds
+blue_spectrum <- brewer.pal(9, "GnBu")[c(8, 5)]  # Choosing darker and somewhat lighter blues
+
+
+  # ... (rest of your function) ...
+  color_order <- c(red_spectrum[1],"darkgrey", blue_spectrum[1])
+  shape_order  <- c("pch", "pch", "pch")
+  p = p + scale_alpha_identity(guide="none") + scale_color_manual(values = color_order, labels =labels,  name = "Comparisons")  + scale_shape_manual(values = shape_order, labels = labels) +
+   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill='transparent'),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1),legend.text=element_text(size=10),
+          text = element_text(size = 12),legend.position="bottom") + 
+    guides(colour = guide_legend(ncol = 2,title.position="top", title.hjust = 0.5)) + ggtitle("Comparison of endogenous phosphorylation site \nabundances") 
+nudge_directions <- c(0.3, -0.3)  # replace these with your preferred values
+
+
+  print(p)
+  invisible()
+  return(p)
+}
+
+volcano_plot_ggplot_multicol_overlay_DTU <- function(fit, coefs = 1L, style = "p-value", 
+                                                 highlight = 0L, names = rownames(fit$coef), 
+                                                 hl.col.up = "red", hl.col.down = "blue", 
+                                                 point_color = "darkgray", xlab = "Log2 Fold Change",
+                                                 ylab = NULL, pch = 16, cex = 0.5, 
+                                                 p_value_threshold = 0.05, log2FC_threshold = 1, ...) {
+  if (!is(fit, "MArrayLM")) 
+    stop("fit must be an MArrayLM")
+  
+  style <- match.arg(tolower(style), c("p-value", "b-statistic"))
+  
+  data_list <- list()
+  
+  for (coef in coefs) {
+    x <- as.matrix(fit$coef)[, coef]
+    
+    if (style == "p-value") {
+      if (is.null(fit$p.value)) 
+        stop("No p-values found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$p.value)[, coef]
+      y <- -log10(y)
+      if (is.null(ylab)) 
+        ylab = "-log10(limma moderated p value)"
+    }
+    else {
+      if (is.null(fit$lods)) 
+        stop("No B-statistics found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$lods)[, coef]
+      if (is.null(ylab)) 
+        ylab = "Log Odds of Differential Expression"
+    }
+    
+    if (is.null(names)) {
+      names <- 1:length(x)
+    }
+    
+    coef_data <- data.frame(x = x, y = y, names = names, coef = factor(coef))
+    data_list[[as.character(coef)]] <- coef_data
+  }
+  
+    # ... (rest of your function) ...
+  
+  data <- do.call(rbind, data_list)
+  
+  p <- ggplot(data, aes(x, y)) + labs(x = xlab, y = ylab)
+  
+  # Manually specify each comparison
+  coef1_data <- data[data$coef == coefs[1],]
+  coef2_data <- data[data$coef == coefs[2],]
+  
+  # Determine labels based on the coefficients provided
+labels <- c()
+for (coef in coefs) {
+    coef_name <- colnames(fit$coef)[coef]
+    labels <- c(labels, paste0(coef_name, " up"))
+}
+labels <- c(labels, "Not significant")
+for (coef in coefs) {
+    coef_name <- colnames(fit$coef)[coef]
+    labels <- c(labels, paste0(coef_name, " down"))
+}
+  
+  
+  
+  p <- p + geom_point(data = coef1_data, aes(color = ifelse(x >= log2FC_threshold, "blue", 
+                                                            ifelse(x <= -log2FC_threshold, "darkred",
+                                                                   point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >=-log10(p_value_threshold), 1, 0.01)), 
+                      shape = pch, size = cex)
+  p <- p + geom_point(data = coef2_data, aes(color = ifelse(x >= log2FC_threshold, "cyan", 
+                                                            ifelse(x <= -log2FC_threshold, "pink", 
+                                                                   point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >= -log10(p_value_threshold), 1, 0.01)), 
+                      shape = 18, size = cex)
+  # Getting 2 colors from each palette
+red_spectrum <- brewer.pal(9, "YlOrRd")[c(8, 5)]  # Choosing darker and somewhat lighter reds
+blue_spectrum <- brewer.pal(9, "GnBu")[c(8, 5)]  # Choosing darker and somewhat lighter blues
+
+
+  # ... (rest of your function) ...
+  color_order <- c(red_spectrum[2], "darkgrey", blue_spectrum[2])
+  shape_order  <- c(18, "pch", 18)
+  p = p + scale_alpha_identity(guide="none") + scale_color_manual(values = color_order, labels =labels,  name = "Comparisons")  + scale_shape_manual(values = shape_order, labels = labels) +
+   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill='transparent'),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1),legend.text=element_text(size=10),
+          text = element_text(size = 12),legend.position="bottom") + 
+    guides(colour = guide_legend(ncol = 2,title.position="top", title.hjust = 0.5)) + ggtitle("Comparison of phosphorylation \nsite abundances") 
+nudge_directions <- c(0.3, -0.3)  # replace these with your preferred values
+
+
+  print(p)
+  invisible()
+  return(p)
+}
+volcano_plot_ggplot_multicol <- function(fit, coefs = 1L, style = "p-value", 
+                                         highlight = 0L, names = rownames(fit$coef), 
+                                         hl.col.up = "red", hl.col.down = "blue", 
+                                         point_color = "darkgray", xlab = "Log2 Fold Change",
+                                         ylab = NULL, pch = 16, cex = 0.5, facet = "grid", 
+                                         p_value_threshold = 0.05, log2FC_threshold = 1, ...) {
+  if (!is(fit, "MArrayLM")) 
+    stop("fit must be an MArrayLM")
+  
+  style <- match.arg(tolower(style), c("p-value", "b-statistic"))
+  
+  data_list <- list()
+  
+  for (coef in coefs) {
+    x <- as.matrix(fit$coef)[, coef]
+    
+    if (style == "p-value") {
+      if (is.null(fit$p.value)) 
+        stop("No p-values found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$p.value)[, coef]
+      y <- -log10(y)
+      if (is.null(ylab)) 
+        ylab = "-log10(limma moderated p value)"
+    }
+    else {
+      if (is.null(fit$lods)) 
+        stop("No B-statistics found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$lods)[, coef]
+      if (is.null(ylab)) 
+        ylab = "Log Odds of Differential Expression"
+    }
+    
+    if (is.null(names)) {
+      names <- 1:length(x)
+    }
+    
+    coef_data <- data.frame(x = x, y = y, names = names, coef = factor(coef))
+    data_list[[as.character(coef)]] <- coef_data
+  }
+  
+  data <- do.call(rbind, data_list)
+  
+     p <- ggplot(data, aes(x, y)) + 
+    geom_point(aes(color = ifelse(x >= log2FC_threshold, hl.col.up, ifelse(x <= -log2FC_threshold, hl.col.down, point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >= -log10(p_value_threshold), 1, 0.01)),
+               shape = pch, size = cex) +
+    scale_color_identity(guide = FALSE) + scale_alpha_identity(guide=FALSE) +
+    #theme_classic() + 
+    labs(x = xlab, y = ylab) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill='transparent'),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1),
+          text = element_text(size = 12))
+
+  # ... (rest of the function remains the same) ...
+
+  if (highlight > 0) {
+    for (coef in coefs) {
+      coef_data <- data[data$coef == coef,]
+      o <- order(coef_data$y, decreasing = TRUE)
+      i <- o[1:highlight]
+      p <- p + ggrepel::geom_text_repel(data = coef_data[i,], aes(label = names, 
+                                                                  color = ifelse(x >= log2FC_threshold, hl.col.up, ifelse(x <= -log2FC_threshold, hl.col.down, point_color)),
+                                                                  alpha = ifelse(abs(x) >= log2FC_threshold & y >= -log10(p_value_threshold), 1, 0.5)),
+                                        size = 2, nudge_y = 0.3)
+    }
+  }
+panel_labels <- vector(mode = "character", length = length(coefs))
+  names(panel_labels) <- as.character(coefs)
+
+  for (i in seq_along(coefs)) {
+    panel_labels[as.character(coefs[i])] <- colnames(fit$coef)[coefs[i]]
+  }
+
+  
+    p <- p + facet_wrap(. ~ coef, ncol =2,labeller = as_labeller(panel_labels))
+  
+     
+  print(p)
+  invisible()
+  return(p)
+}
+
+volcano_plot_ggplot_multicol_phosSites <- function(fit, coefs = 1L, style = "p-value", 
+                                         highlight = 20, names = rownames(fit$coef), 
+                                         hl.col.up = "red", hl.col.down = "blue", 
+                                         point_color = "black", xlab = "Log2 (WT vs KO) ratio",
+                                         ylab = NULL, pch = 16, cex = 0.5, facet = "grid", 
+                                         p_value_threshold = 0.05, log2FC_threshold = 1,title, ...) {
+  if (!is(fit, "MArrayLM")) 
+    stop("fit must be an MArrayLM")
+  
+  style <- match.arg(tolower(style), c("p-value", "b-statistic"))
+  
+  data_list <- list()
+  
+  for (coef in coefs) {
+    x <- as.matrix(fit$coef)[, coef]
+    
+    if (style == "p-value") {
+      if (is.null(fit$p.value)) 
+        stop("No p-values found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$p.value)[, coef]
+      y <- -log10(y)
+      if (is.null(ylab)) 
+        ylab = "-log10(limma moderated p value)"
+    }
+    else {
+      if (is.null(fit$lods)) 
+        stop("No B-statistics found in linear model fit object. Please run eBayes.")
+      y <- as.matrix(fit$lods)[, coef]
+      if (is.null(ylab)) 
+        ylab = "Log Odds of Differential Expression"
+    }
+    
+    if (is.null(names)) {
+      names <- 1:length(x)
+    }
+    
+    coef_data <- data.frame(x = x, y = y, names = names, coef = factor(coef))
+    data_list[[as.character(coef)]] <- coef_data
+  }
+  
+  data <- do.call(rbind, data_list)
+  
+     p <- ggplot(data, aes(x, y,label=phos_Site       )) + geom_vline(xintercept=log2(1.5),linetype=3) +
+    geom_point(aes(color = ifelse(x >= log2FC_threshold, hl.col.up, ifelse(x <= -log2FC_threshold, hl.col.down, point_color)), alpha = ifelse(abs(x) >= log2FC_threshold & y >= -log10(p_value_threshold), 1, 1)),
+               shape = pch, size = cex) +
+    scale_color_identity(guide = FALSE) + scale_alpha_identity(guide=FALSE) + ylim(0,5) + xlim(-1.0,2)+
+    #theme_classic() + 
+    labs(x = xlab, y = ylab) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill='transparent'),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1),
+          text = element_text(size = 12))
+
+  # ... (rest of the function remains the same) ...
+
+    p <- p + geom_label_repel(aes(label = phos_Site), nudge_y = 0.25,nudge_x = .15,segment.curvature = -1e-20,
+    arrow = arrow(length = unit(0.015, "npc")),
+                  box.padding   = 0.35, max.overlaps = Inf,
+                  point.padding = 0.5,
+                  segment.color = 'grey50', size  = 2) + ggtitle(title)
+    
+  #print(p)
+  invisible()
+  return(p)
+}
+
+combine_GOplots_with_shared_legend <- function(plot1, plot2) {
+  # Remove the legend from both plots
+  plot1_no_legend <- plot1 + theme(legend.position = "none")
+  plot2_no_legend <- plot2 + theme(legend.position = "none")
+
+  # Combine the plots using ggarrange without legends
+  combined_plots <- ggarrange(plot1_no_legend, plot2_no_legend, ncol = 2)
+
+  # Extract the legend from the first plot
+  plot1_legend <- get_legend(plot1)
+  plot2_legend <- get_legend(plot2)
+
+   # Get the number of legend elements in both plots
+  n_legend_elements_plot1 <- max(plot1$data$n)
+  n_legend_elements_plot2 <- max(plot2$data$n)
+    # Choose the legend with more elements
+  selected_legend <- if (n_legend_elements_plot1 >= n_legend_elements_plot2) plot1_legend else plot2_legend
+
+# Combine the plots and the shared legend using the cowplot package
+  final_plot <- cowplot::plot_grid(combined_plots, selected_legend, ncol = 1, rel_heights = c(1, 0.4))
+
+  return(final_plot)
+}
+
+combine_plots_with_shared_legend <- function(plot1, plot2) {
+  # Remove the legend from both plots
+  plot1_no_legend <- plot1 + theme(legend.position = "none")
+  plot2_no_legend <- plot2 + theme(legend.position = "none")
+
+  # Combine the plots using ggarrange without legends
+  combined_plots <- ggarrange(plot1_no_legend, plot2_no_legend, ncol = 2)
+
+  # Extract the legend from the first plot
+  plot1_legend <- get_legend(plot1)
+  plot2_legend <- get_legend(plot2)
+
+   # Get the number of legend elements in both plots
+  n_legend_elements_plot1 <- max(plot1$data$n)
+  n_legend_elements_plot2 <- max(plot2$data$n)
+    # Choose the legend with more elements
+  selected_legend <- if (n_legend_elements_plot1 >= n_legend_elements_plot2) plot1_legend else plot2_legend
+
+# Combine the plots and the shared legend using the cowplot package
+  final_plot <- cowplot::plot_grid(combined_plots, selected_legend, ncol = 1, rel_heights = c(0.9, 0.1))
+
+  return(final_plot)
+}
+process_signalomes_results <- function(Signalomes_results_DTU_Up) {
+
+  # Convert the character vector into a data frame
+  signalomes_results_DTU_Up_df <- data.frame(gene_and_phos_site = names(Signalomes_results_DTU_Up$proteinModules),
+                                             module_number = as.numeric(Signalomes_results_DTU_Up$proteinModules),
+                                             stringsAsFactors = FALSE)
+  
+  # Create a list to store the new data frames
+  module_dfs <- list()
+  
+  # Iterate through the unique module numbers and create a data frame for each module
+  for (module_number in unique(signalomes_results_DTU_Up_df$module_number)) {
+    module_subset <- signalomes_results_DTU_Up_df[signalomes_results_DTU_Up_df$module_number == module_number, "gene_and_phos_site"]
+    module_dfs[[paste0("module_", module_number)]] <- data.frame(gene_and_phos_site = module_subset)
+  }
+  
+  convert_to_entrez <- function(gene_and_phos_site) {
+    # Extract gene names
+    gene_names <- gsub(" .*", "", gene_and_phos_site)
+  
+    # Convert gene names to Entrez IDs
+    entrez_ids <- mapIds(org.Hs.eg.db,
+                         keys = gene_names,
+                         column = "ENTREZID",
+                         keytype = "SYMBOL",
+                         multiVals = "first")
+  
+    # Remove NA values
+    entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+  
+    return(entrez_ids)
+}
+  
+  # Create a new list to store the Entrez IDs as character vectors
+  module_entrez_ids_chr <- list()
+  
+  # Iterate through each module and convert gene names to Entrez IDs
+  for (module_name in names(module_dfs)) {
+    module_entrez_ids_chr[[module_name]] <- as.character(convert_to_entrez(module_dfs[[module_name]]$gene_and_phos_site))
+  }
+  
+  return(module_entrez_ids_chr)
+}
+#Remove irregular sequences
+short_fourth_term <- function(row_name) {
+  terms <- unlist(strsplit(row_name, ";"))
+  if (length(terms) >= 4) {
+    return (nchar(terms[4]) < 4)
+  }
+  return (FALSE)
+}
+remove_nonunique_rownames_matrix <- function(mat) {
+  # Convert the matrix to a data frame
+  df <- as.data.frame(mat)
+  
+  # Create a new column 'rownames' with the current row names
+  df$rownames <- rownames(mat)
+  
+  # Count the occurrences of each row name
+  rowname_counts <- table(df$rownames)
+  
+  # Find the row names that occur only once
+  unique_rownames <- names(rowname_counts[rowname_counts == 1])
+  
+  # Keep only the rows with unique row names
+  df_unique <- df[df$rownames %in% unique_rownames, ]
+  
+  # Reset the row names
+  rownames(df_unique) <- df_unique$rownames
+  
+  # Remove the 'rownames' column
+  df_unique$rownames <- NULL
+  
+  # Convert the data frame back to a matrix
+  mat_unique <- as.matrix(df_unique)
+  
+  return(mat_unique)
+}
+
+kinaseSubstrateHeatmap_modified = function (phosScoringMatrices, top = 3, printPlot = NULL, filePath = "./kinaseSubstrateHeatmap.pdf", 
+    width = 10, height = 10) 
+{
+    utils::data("KinaseFamily", envir = environment())
+    sites <- c()
+    for (i in seq_len(ncol(phosScoringMatrices$combinedScoreMatrix))) {
+        sites <- union(sites, names(sort(phosScoringMatrices$combinedScoreMatrix[, 
+            i], decreasing = TRUE)[seq_len(top)]))
+    }
+    o <- intersect(colnames(phosScoringMatrices$combinedScoreMatrix), 
+        rownames(KinaseFamily))
+    annotation_col = data.frame(group = KinaseFamily[o, "kinase_group"], 
+        family = KinaseFamily[o, "kinase_family"])
+    rownames(annotation_col) <- o
+    if (is.null(printPlot) == TRUE) {
+      
+        pheatmap(phosScoringMatrices$combinedScoreMatrix[sites, 
+            ], annotation_col = annotation_col, cluster_rows = TRUE, 
+            cluster_cols = TRUE, fontsize = 7)
+      
+    }
+    else {
+        pdf(file = filePath, width = width, height = height)
+      
+        pheatmap(phosScoringMatrices$combinedScoreMatrix[sites, 
+            ], annotation_col = annotation_col, cluster_rows = TRUE, 
+            cluster_cols = TRUE, fontsize = 7)
+        
+        dev.off()
+    }
+}
+siteAnnotate_modified <- function(site, phosScoringMatrices, predMatrix) {
+  od <- order(predMatrix[site, ], decreasing = FALSE)
+  kinases <- colnames(predMatrix)[od]
+  
+  par(mfrow = c(1, 4), mar = c(1, 5, 5, 1))
+  
+  barplot(predMatrix[site, kinases], las = 1, xlab = "Prediction score", 
+          col = "red3", main = "Prediction score", xlim = c(0, 1), horiz = TRUE, xaxt= "n")
+  axis(3)
+  barplot(phosScoringMatrices$combinedScoreMatrix[site, kinases], 
+          las = 1, main = "Combined score", col = "orange2", xlim = c(0, 1), horiz = TRUE,xaxt= "n")
+   axis(3)
+  barplot(phosScoringMatrices$motifScoreMatrix[site, kinases], 
+          las = 1, main = "Motif score", col = "green4", xlim = c(0, 1), horiz = TRUE,xaxt= "n")
+   axis(3)
+  barplot(phosScoringMatrices$profileScoreMatrix[site, kinases], 
+          las = 1, main = "Profile score", col = "lightblue3", 
+          xlim = c(0, 1), horiz = TRUE,xaxt= "n")
+   axis(3)
+  mtext(paste("Site =", site),                   # Add main title
+      side = 3,
+      line = - 2,
+      outer = TRUE)
+}
+
+siteAnnotate_modified_ggplot <- function(site, phosScoringMatrices, predMatrix) {
+  od <- order(predMatrix[site, ], decreasing = FALSE)
+  kinases <- colnames(predMatrix)[od]
+  
+  plot_data <- list(predMatrix[site, kinases], phosScoringMatrices$combinedScoreMatrix[site, kinases],
+                   phosScoringMatrices$motifScoreMatrix[site, kinases], phosScoringMatrices$profileScoreMatrix[site, kinases])
+  plot_types <- c("Prediction score", "Combined score", "Motif score", "Profile score")
+  plot_colors <- c("red3", "orange2", "green4", "lightblue3")
+  
+  plots <- list()
+  
+  for (i in 1:4) {
+    df <- data.frame(Kinase = factor(kinases, levels = kinases), Value = plot_data[[i]])
+    
+    p <- ggplot(df, aes(x = Kinase, y = Value, fill = factor(plot_types[i]))) +
+      geom_col() +
+      coord_flip() +
+      scale_fill_manual(values = plot_colors[i], guide = "none") +
+      theme_classic() +
+      theme(axis.title.y = element_blank(),
+            axis.text.y = element_text(size = 7),
+            axis.title.x = element_text(size = 0),
+            plot.title = element_text(hjust = 0.5, size = 8),
+            axis.text.x.top = element_text(angle = 45, hjust = 1)) +
+      labs(title = plot_types[i], x = NULL) +
+      scale_x_discrete(position = "top") +
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0)), limits = c(0, 1),breaks = c(0,1))
+    
+    plots[[i]] <- p
+  }
+  title1=text_grob(paste(site), size = 9, face = "bold")   #### this worked for me
+
+  grid.arrange(grobs = plots, ncol = 4, top = title1)
+}
+
+
+plotSignalomeMap_modified <- function(signalomes, color,module_colors, max_percent = 100,size =10) {
+    df <- stack(signalomes$kinaseSubstrates)
+    modules <- signalomes$proteinModule
+    names(modules) <- unlist(lapply(strsplit(as.character(names(signalomes$proteinModules)), ";"), "[[", 1))
+    df$cluster <- modules[df$values]
+    df_balloon <- df
+    df_balloon <- na.omit(df_balloon) %>% dplyr::count(.data$cluster, .data$ind)
+    df_balloon$ind <- as.factor(df_balloon$ind)
+    df_balloon$cluster <- as.factor(df_balloon$cluster)
+    df_balloon <- tidyr::spread(df_balloon, .data$ind, .data$n)[, -1]
+    df_balloon[is.na(df_balloon)] <- 0
+    df_balloon <- do.call(rbind, lapply(seq(nrow(df_balloon)), function(x) {
+        res <- unlist(lapply(df_balloon[x, ], function(y) y/sum(df_balloon[x, ]) * 100))
+    }))
+    df_balloon <- reshape2::melt(as.matrix(df_balloon))
+    colnames(df_balloon) <- c("cluster", "ind", "n")
+    df_balloon <- df_balloon[df_balloon$n > 0, ]
+    
+     # Normalize the n column based on the max_percent value
+  max_percentage <- max(df_balloon$n)
+  normalized_n <- (df_balloon$n / max_percentage) * max_percent
+  df_balloon$normalized_n <- normalized_n
+  
+    # Function to find the last balloon for each group
+last_balloon_y <- function(group_data) {
+  max(group_data$y[group_data$x == max(group_data$x)])
+}
+
+# Add a new column to the dataframe containing the last balloon's y value for each group
+df_balloon$last_y <- sapply(unique(df_balloon$cluster), function(cluster) {
+  last_balloon_y(df_balloon[df_balloon$cluster == cluster, ])
+})[df_balloon$cluster]
+
+
+# Function to find the first balloon for each group
+first_balloon_y <- function(group_data) {
+  min(group_data$y[group_data$x == min(group_data$x)])
+}
+
+# Add a new column to the dataframe containing the first balloon's y value for each group
+df_balloon$first_y <- sapply(unique(df_balloon$cluster), function(cluster) {
+  first_balloon_y(df_balloon[df_balloon$cluster == cluster, ])
+})[df_balloon$cluster]  
+
+    g <- ggplot2::ggplot(df_balloon, aes(y = .data$ind, x = .data$cluster)) + 
+      
+        
+         #geom_text(aes(label = .data$cluster, x = .data$cluster, y = 0), angle = 90, hjust = 1, size = 3) +  # Show x-axis labels using geom_text
+         
+        theme_classic() + 
+        theme(legend.position = "bottom", legend.direction = "horizontal", legend.title = element_text(angle = 0),
+              plot.margin = margin(, 0.5, , , "cm"),aspect.ratio = 1,
+              axis.line = element_blank(), 
+              axis.title = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+              axis.text.y = element_text(size = 14),
+              panel.grid.major.x = element_blank(), 
+              panel.grid.minor.x = element_blank()) +
+        guides(col = FALSE)  # Remove the legend for the kinases
+    # Add rectangles and text labels for module names on the x-axis
+    
+    
+    g <- g + geom_line(aes(group = .data$cluster, col = .data$ind), size = 0.5, linetype = "solid", color = "grey") +  # Connect the balloons within the horizontal line
+      geom_segment(data = df_balloon, aes(x = .data$cluster, xend = .data$cluster, y = .data$first_y, yend = .data$last_y, col = .data$ind), size = 0.5, linetype = "solid", show.legend = FALSE, color = "grey") 
+    
+    rectangle_height <- 30
+# Add rectangles for module names on the x-axis
+    for (i in unique(df_balloon$cluster)) {
+    g <- g + annotate("rect", xmin = as.numeric(i) - 0.45, xmax = as.numeric(i) + 0.45, ymin = -1.5, ymax = 0, alpha = 0.7, fill = module_colors[i]) + annotate("text", x = i, y = -0.025 * rectangle_height, label = i, size = 4, fontface = "bold")
+}
+g= g + scale_color_manual(values = color) +
+    scale_size_continuous(name = "% of phosphosites regulated by a kinase", range = c(1, size),
+                          guide = guide_legend(title.position = "top", title.hjust = 0.5),
+                          limits = c(0, max_percent))
+    g = g + geom_point(aes(col = .data$ind, size = .data$normalized_n))
+  
+     #Set the limits using the y_axis_limits argument
+  #g <- g + scale_y_discrete(limits = y_axis_limits)
+# Use geom_segment() to draw lines from the x-axis to the last balloon for each group
+#g <- g + 
+    g
+}
+
+plot_kinase_activity_NoSerum <- function(input_data, group,title) {
+  if (group == "DTU") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("WT_NoSerum|DTU", colnames(input_data))]
+    label <- "DMKN \U03B2\U03B3-/-"
+  } else if (group == "CS") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("WT_NoSerum|CS", colnames(input_data))]
+    label <- "DMKN \U03B1\U03B2-/-"
+  } else {
+    stop("Invalid group. Please specify either 'DTU' or 'CS'")
+  }
+  
+  long_data <- melt(filtered_data, variable.name = "Condition", value.name = "Score")
+  
+  long_data$Genotype <- ifelse(str_detect(long_data$Var2, group), label, "WT")
+  long_data$Treatment <- ifelse(str_detect(long_data$Var2, "Treated"), "Treated", "Control")
+  long_data$Genotype_Treatment <- paste(long_data$Genotype, long_data$Treatment, sep = " ")
+  
+   # Define the list of comparisons based on the input group
+  if (group == "DTU") {
+    my_comparisons <- list(c("WT Control", "WT Treated"),
+                           c("DMKN \U03B2\U03B3-/- Control", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control","DMKN \U03B2\U03B3-/- Control"),
+                           c("WT Treated","DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control", "DMKN \U03B2\U03B3-/- Treated")
+                           )
+        
+    long_data$Genotype_Treatment <- factor(long_data$Genotype_Treatment,
+                                       levels = c("WT Control", "WT Treated",
+                                                  "DMKN \U03B2\U03B3-/- Control", 
+                                                  "DMKN \U03B2\U03B3-/- Treated"))
+  } else if (group == "CS") {
+    my_comparisons <- list(c("WT Control", "WT Treated"),
+                           c("DMKN \U03B1\U03B2-/- Control", "DMKN \U03B1\U03B2-/- Treated"),
+                           c("WT Control","DMKN \U03B1\U03B2-/- Control"),
+                           c("WT Treated","DMKN \U03B1\U03B2-/- Treated"),
+                           c("WT Control", "DMKN \U03B1\U03B2-/- Treated")
+                           )
+    
+    long_data$Genotype_Treatment <- factor(long_data$Genotype_Treatment,
+                                       levels = c("WT Control", "WT Treated", 
+                                                  "DMKN \U03B1\U03B2-/- Control", 
+                                                  "DMKN \U03B1\U03B2-/- Treated"))
+  } else {
+    stop("Invalid group specified. Please use either 'DTU' or 'CS'.")
+  }
+  
+  plot <- ggplot(long_data, aes(x = Genotype_Treatment, y = Score, fill = Genotype)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+    #geom_errorbar(aes(ymin = Score - sd(Score), ymax = Score + sd(Score)), position = position_dodge(0.8), width = 0.3) +
+    facet_wrap(~Var1, scales = "free_x", ncol = 5) +
+    labs(x = "Comparison", y = "Kinase Activity Score") +
+    theme_bw()+ ylim(-3,4.5)+ theme(
+      legend.position = "bottom", 
+      axis.text.x = element_text(size = 3),
+      axis.text.y = element_text(size = 7), 
+      axis.title = element_text(size=9, face = "bold"),
+      strip.text = element_text(size = 8),
+      plot.margin = margin(, 0.5, , , "cm"),
+      strip.text.x = element_text(margin = margin(.05, 0, .05, 0, "cm")))+
+    stat_compare_means(comparisons = my_comparisons, tip.length = 0.01, vjust = 0.55,
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                                          symbols = c("****", "***", "**", "*", "ns")), 
+                       label = "p.signif", method = "t.test", label.y = max(long_data$Score) * 1.0,
+                       step.increase = 0.08, hide.ns	= TRUE) + scale_x_discrete(guide = guide_axis(n.dodge = 2))
+   plot = plot + ggtitle(title)
+  return(plot)
+}
+plot_kinase_activity_NoSerum_all_combos <- function(input_data, group) {
+  if (group == "DTU") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("", colnames(input_data))]
+    labelA <- "DMKN \U03B2\U03B3-/-"
+    labelB <- "DMKN \U03B1\U03B2-/-"
+  } else if (group == "CS") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("", colnames(input_data))]
+    labelA <- "DMKN \U03B2\U03B3-/-"
+    labelB <- "DMKN \U03B1\U03B2-/-"
+  } else {
+    stop("Invalid group. Please specify either 'DTU' or 'CS'")
+  }
+  
+  long_data <- melt(filtered_data, variable.name = "Condition", value.name = "Score")
+  
+  long_data$Genotype <- ifelse(str_detect(long_data$Var2, "DTU"), "DMKN βγ-/-",
+                             ifelse(str_detect(long_data$Var2, "CS"), "DMKN \U03B1\U03B2-/-", "WT"))
+  long_data$Treatment <- ifelse(str_detect(long_data$Var2, "Treated"), "Treated", "Control")
+  long_data$Genotype_Treatment <- paste(long_data$Genotype, long_data$Treatment, sep = " ")
+  
+   # Define the list of comparisons based on the input group
+  if (group == "DTU") {
+    my_comparisons <- list(c("WT Control", "WT Treated"),
+                           c("DMKN \U03B2\U03B3-/- Control", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("DMKN \U03B1\U03B2-/- Control", "DMKN \U03B1\U03B2-/- Treated"),
+                           c("DMKN \U03B1\U03B2-/- Control", "DMKN \U03B2\U03B3-/- Control"),
+                           c("DMKN \U03B1\U03B2-/- Treated", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control","DMKN \U03B2\U03B3-/- Control"),
+                           c("WT Treated","DMKN \U03B1\U03B2-/- Treated"),
+                           c("WT Treated","DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control","DMKN \U03B1\U03B2-/- Treated")
+                           )
+        
+    long_data$Genotype_Treatment <- factor(long_data$Genotype_Treatment,
+                                       levels = c("WT Control", "WT Treated",
+                                                  "DMKN \U03B2\U03B3-/- Control", 
+                                                  "DMKN \U03B2\U03B3-/- Treated",
+                                                  "DMKN \U03B1\U03B2-/- Control", 
+                                                  "DMKN \U03B1\U03B2-/- Treated"))
+  } else if (group == "CS") {
+    my_comparisons <- list(c("WT Control", "WT Treated"),
+                           c("DMKN \U03B2\U03B3-/- Control", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("DMKN \U03B1\U03B2-/- Control", "DMKN \U03B1\U03B2-/- Treated"),
+                           c("DMKN \U03B1\U03B2-/- Control", "DMKN \U03B2\U03B3-/- Control"),
+                           c("DMKN \U03B1\U03B2-/- Treated", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control","DMKN \U03B2\U03B3-/- Control"),
+                           c("WT Treated","DMKN \U03B1\U03B2-/- Treated"),
+                           c("WT Treated","DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control", "DMKN \U03B2\U03B3-/- Treated"),
+                           c("WT Control","DMKN \U03B1\U03B2-/- Treated")
+                           )
+    
+    long_data$Genotype_Treatment <- factor(long_data$Genotype_Treatment,
+                                       levels = c("WT Control", "WT Treated",
+                                                  "DMKN \U03B2\U03B3-/- Control", 
+                                                  "DMKN \U03B2\U03B3-/- Treated",
+                                                  "DMKN \U03B1\U03B2-/- Control", 
+                                                  "DMKN \U03B1\U03B2-/- Treated"))
+  } else {
+    stop("Invalid group specified. Please use either 'DTU' or 'CS'.")
+  }
+  
+  plot <- ggplot(long_data, aes(x = Genotype_Treatment, y = Score, fill = Genotype)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+    #geom_errorbar(aes(ymin = Score - sd(Score), ymax = Score + sd(Score)), position = position_dodge(0.8), width = 0.3) +
+    facet_wrap(~Var1, scales = "free_x", ncol = 5) +
+    labs(x = "Comparison", y = "Kinase Activity Score") +
+    theme_bw()+ ylim(-3,4.5)+ theme(
+      legend.position = "bottom", 
+      axis.text.x = element_text(size = 3),
+      axis.text.y = element_text(size = 7), 
+      axis.title = element_text(size=9, face = "bold"),
+      strip.text = element_text(size = 8),
+      plot.margin = margin(, 0.5, , , "cm"),
+      strip.text.x = element_text(margin = margin(.05, 0, .05, 0, "cm")))+
+    stat_compare_means(comparisons = my_comparisons, tip.length = 0.01, vjust = 0.55,
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                                          symbols = c("****", "***", "**", "*", "ns")), 
+                       label = "p.signif", method = "t.test", label.y = max(long_data$Score) * 1.0,
+                       step.increase = 0.08, hide.ns	= TRUE) + scale_x_discrete(guide = guide_axis(n.dodge = 2))
+  
+  return(plot)
+}
+plot_kinase_activity_NoSerum_Genotypes <- function(input_data, group, title) {
+  if (group == "DTU") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("_control|_Control", colnames(input_data))]
+    label1 <- "DMKN \U03B2\U03B3-/-"
+  } else if (group == "CS") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("_control|_Control", colnames(input_data))]
+    label2 <- "DMKN \U03B1\U03B2-/-"
+  } else {
+    stop("Invalid group. Please specify either 'DTU' or 'CS'")
+  }
+  
+  long_data <- melt(filtered_data, variable.name = "Condition", value.name = "Score")
+  
+  long_data$Genotype <- ifelse(str_detect(long_data$Var2, "DTU"), "DMKN βγ-/-",
+                             ifelse(str_detect(long_data$Var2, "CS"), "DMKN \U03B1\U03B2-/-", "WT"))
+  long_data$Treatment <- ifelse(str_detect(long_data$Var2, "Treated"), "Treated", "Control")
+  long_data$Genotype_Treatment <- paste(long_data$Genotype, long_data$Treatment, sep = " ")
+  
+   # Define the list of comparisons based on the input group
+  if (group == "DTU") {
+    my_comparisons <- list(c("WT", "DMKN \U03B2\U03B3-/-"),
+                           c("WT","DMKN \U03B1\U03B2-/-"),
+                           c("DMKN \U03B2\U03B3-/-", "DMKN \U03B2\U03B3-/-")
+                           )
+        
+    long_data$Genotype_Treatment <- factor(long_data$Genotype,
+                                       levels = c("WT", "DMKN \U03B2\U03B3-/-",
+                                                  "DMKN \U03B1\U03B2-/-"))
+  } else if (group == "CS") {
+    my_comparisons <- list(c("WT", "DMKN \U03B2\U03B3-/-"),
+                           c("WT","DMKN \U03B1\U03B2-/-"),
+                           c("DMKN \U03B2\U03B3-/-", "DMKN \U03B2\U03B3-/-")
+                           
+                           )
+    
+    long_data$Genotype_Treatment <- factor(long_data$Genotype_Treatment,
+                                       levels = c("WT", "DMKN \U03B2\U03B3-/-",
+                                                  "DMKN \U03B1\U03B2-/-"))
+  } else {
+    stop("Invalid group specified. Please use either 'DTU' or 'CS'.")
+  }
+  
+  plot <- ggplot(long_data, aes(x = Genotype, y = Score, fill = Genotype)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+    #geom_errorbar(aes(ymin = Score - sd(Score), ymax = Score + sd(Score)), position = position_dodge(0.8), width = 0.3) +
+    facet_wrap(~Var1, scales = "free_x", ncol = 5) +
+    labs(x = "Comparison", y = "Kinase Activity Score") +
+    theme_bw()+ ylim(-3,6)+ theme(
+      legend.position = "bottom", 
+      axis.text.x = element_text(size = 7),
+      axis.text.y = element_text(size = 7), 
+      axis.title = element_text(size=9, face = "bold"),
+      strip.text = element_text(size = 8),
+      plot.margin = margin(, 0.5, , , "cm"),
+      strip.text.x = element_text(margin = margin(.05, 0, .05, 0, "cm")))+
+    stat_compare_means(comparisons = my_comparisons, tip.length = 0.01, vjust = 0.55,
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 2), 
+                                          symbols = c("****", "***", "**", "*", "ns")), 
+                       label = "p.signif", method = "t.test", label.y = max(long_data$Score) * 1.0,
+                       step.increase = 0.25, hide.ns	= TRUE) + scale_x_discrete(guide = guide_axis(n.dodge = 2))
+   plot = plot + ggtitle(title)
+  return(plot)
+}
+plot_kinase_activity_NoSerum_Genotypes_forFIT2 <- function(input_data, group,title) {
+  if (group == "DTU") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("_control|_Control", colnames(input_data))]
+    label1 <- "DMKN \U03B2\U03B3-/-"
+  } else if (group == "CS") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("_control|_Control", colnames(input_data))]
+    label2 <- "DMKN \U03B1\U03B2-/-"
+  } else {
+    stop("Invalid group. Please specify either 'DTU' or 'CS'")
+  }
+  
+  long_data <- melt(filtered_data, variable.name = "Condition", value.name = "Score")
+  
+  long_data$Genotype <- ifelse(str_detect(long_data$Var2, "DTU"), "DMKN βγ-/-",
+                             ifelse(str_detect(long_data$Var2, "CS"), "DMKN \U03B1\U03B2-/-", "WT"))
+  long_data$Treatment <- ifelse(str_detect(long_data$Var2, "Treated"), "Treated", "Control")
+  long_data$Genotype_Treatment <- paste(long_data$Genotype, long_data$Treatment, sep = " ")
+  
+   # Define the list of comparisons based on the input group
+  if (group == "DTU") {
+    my_comparisons <- list(c("WT", "DMKN \U03B2\U03B3-/-"),
+                           c("WT","DMKN \U03B1\U03B2-/-"),
+                           c("DMKN \U03B2\U03B3-/-", "DMKN \U03B2\U03B3-/-")
+                           )
+        
+    long_data$Genotype_Treatment <- factor(long_data$Genotype,
+                                       levels = c("WT", "DMKN \U03B2\U03B3-/-",
+                                                  "DMKN \U03B1\U03B2-/-"))
+  } else if (group == "CS") {
+    my_comparisons <- list(c("WT", "DMKN \U03B2\U03B3-/-"),
+                           c("WT","DMKN \U03B1\U03B2-/-"),
+                           c("DMKN \U03B2\U03B3-/-", "DMKN \U03B2\U03B3-/-")
+                           
+                           )
+    
+    long_data$Genotype_Treatment <- factor(long_data$Genotype_Treatment,
+                                       levels = c("WT", "DMKN \U03B2\U03B3-/-",
+                                                  "DMKN \U03B1\U03B2-/-"))
+  } else {
+    stop("Invalid group specified. Please use either 'DTU' or 'CS'.")
+  }
+  
+  plot <- ggplot(long_data, aes(x = Genotype, y = Score, fill = Genotype)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+    #geom_errorbar(aes(ymin = Score - sd(Score), ymax = Score + sd(Score)), position = position_dodge(0.8), width = 0.3) +
+    facet_wrap(~Var1, scales = "free_x", ncol = 5) +
+    labs(x = "Comparison", y = "Kinase Activity Score") +
+    theme_bw()+ ylim(-3,6)+ theme(
+      legend.position = "bottom", 
+      axis.text.x = element_text(size = 7),
+      axis.text.y = element_text(size = 7), 
+      axis.title = element_text(size=9, face = "bold"),
+      strip.text = element_text(size = 8),
+      plot.margin = margin(, 0.5, , , "cm"),
+      strip.text.x = element_text(margin = margin(.05, 0, .05, 0, "cm")))+
+    stat_compare_means(comparisons = my_comparisons, tip.length = 0.01, vjust = 0.55,
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 2), 
+                                          symbols = c("****", "***", "**", "*", "ns")), 
+                       label = "p.signif", method = "t.test", label.y = max(long_data$Score) * 1.0,
+                       step.increase = 0.25, hide.ns	= TRUE) + scale_x_discrete(guide = guide_axis(n.dodge = 2))
+  plot = plot + ggtitle(title)
+  return(plot)
+}
+plot_kinase_activity_NoSerum_Genotypes_forFIT3 <- function(input_data, group,title) {
+  if (group == "DTU") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("WT_NoSerum_Control|DTU_NoSerum_Control", colnames(input_data))]
+    label <- "DMKN \U03B2\U03B3-/-"
+  } else if (group == "CS") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("WT_NoSerum_Control|CS_NoSerum_Control", colnames(input_data))]
+    label <- "DMKN \U03B1\U03B2-/-"
+  } else {
+    stop("Invalid group. Please specify either 'DTU' or 'CS'")
+  }
+  
+  long_data <- melt(filtered_data, variable.name = "Condition", value.name = "Score")
+  
+  long_data$Genotype <- ifelse(str_detect(long_data$Var2, "DTU"), "DMKN βγ-/-",
+                           ifelse(str_detect(long_data$Var2, "CS"), "DMKN αβ-/-", "WT"))
+
+long_data$Genotype <- factor(long_data$Genotype,
+                           levels = c("WT", "DMKN βγ-/-", "DMKN αβ-/-"))
+
+  long_data$Treatment <- ifelse(str_detect(long_data$Var2, "Treated"), "Treated", "Control")
+  long_data$Genotype_Treatment <- paste(long_data$Genotype, long_data$Treatment, sep = " ")
+  
+   # Define the list of comparisons based on the input group
+  if (group == "DTU") {
+     my_comparisons <- list(c("DMKN βγ-/-", "WT"))
+} else if (group == "CS") {
+     my_comparisons <- list(c("DMKN αβ-/-","WT"))
+}
+ else {
+    stop("Invalid group specified. Please use either 'DTU' or 'CS'.")
+  }
+  
+  plot <- ggplot(long_data, aes(x = Genotype, y = Score, fill = Genotype)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+    #geom_errorbar(aes(ymin = Score - sd(Score), ymax = Score + sd(Score)), position = position_dodge(0.8), width = 0.3) +
+    facet_wrap(~Var1, scales = "free_x", ncol = 5) +
+    labs(x = "Comparison", y = "Kinase Activity Score") +
+    theme_bw()+ ylim(-3,5)+ theme(
+      legend.position = "bottom", 
+      axis.text.x=element_blank(),
+      axis.text.y = element_text(size = 7), 
+      axis.title = element_text(size=9, face = "bold"),
+      strip.text = element_text(size = 8),
+      plot.margin = margin(, 0.5, , , "cm"),
+      legend.key.size = unit(1, 'cm'),
+      legend.title = element_text(size=14), 
+        legend.text = element_text(size=14),
+      strip.text.x = element_text(margin = margin(.05, 0, .05, 0, "cm")))+
+    stat_compare_means(comparisons = my_comparisons, tip.length = 0.01, vjust = 0.55,
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 2), 
+                                          symbols = c("****", "***", "**", "*", "ns")), 
+                       label = "p.signif", method = "t.test", label.y = max(long_data$Score) * 1.0,
+                       step.increase = 0.25, hide.ns	= TRUE) + scale_x_discrete(guide = guide_axis(n.dodge = 2))
+  
+  if (group == "DTU") {
+    plot <- plot + scale_fill_manual(values = c("DMKN βγ-/-" = "#1b9e77", "WT" = "#d95f02"))
+  } else if (group == "CS") {
+    plot <- plot + scale_fill_manual(values = c("DMKN αβ-/-" = "#7570b3", "WT" = "#d95f02"))
+  }
+  plot = plot + ggtitle(title)
+  return(plot)
+}
+
+plot_kinase_activity_Serum_Genotypes_forFIT4 <- function(input_data, group,title) {
+  if (group == "DTU") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("WT_Serum_Control|DTU_Serum_Control", colnames(input_data))]
+    label <- "DMKN \U03B2\U03B3-/-"
+  } else if (group == "CS") {
+    #Change to WT_NoSerum_Control if I dont want to show treated
+    filtered_data <- input_data[, grep("WT_Serum_Serum_Control|CS_Serum_Control", colnames(input_data))]
+    label <- "DMKN \U03B1\U03B2-/-"
+  } else {
+    stop("Invalid group. Please specify either 'DTU' or 'CS'")
+  }
+  
+  long_data <- melt(filtered_data, variable.name = "Condition", value.name = "Score")
+  
+  long_data$Genotype <- ifelse(str_detect(long_data$Var2, "DTU"), "DMKN βγ-/-",
+                           ifelse(str_detect(long_data$Var2, "CS"), "DMKN αβ-/-", "WT"))
+
+long_data$Genotype <- factor(long_data$Genotype,
+                           levels = c("WT", "DMKN βγ-/-", "DMKN αβ-/-"))
+
+  long_data$Treatment <- ifelse(str_detect(long_data$Var2, "Treated"), "Treated", "Control")
+  long_data$Genotype_Treatment <- paste(long_data$Genotype, long_data$Treatment, sep = " ")
+  
+   # Define the list of comparisons based on the input group
+  if (group == "DTU") {
+     my_comparisons <- list(c("DMKN βγ-/-", "WT"))
+} else if (group == "CS") {
+     my_comparisons <- list(c("DMKN αβ-/-","WT"))
+}
+ else {
+    stop("Invalid group specified. Please use either 'DTU' or 'CS'.")
+  }
+  
+  plot <- ggplot(long_data, aes(x = Genotype, y = Score, fill = Genotype)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+    #geom_errorbar(aes(ymin = Score - sd(Score), ymax = Score + sd(Score)), position = position_dodge(0.8), width = 0.3) +
+    facet_wrap(~Var1, scales = "free_x") +
+    labs(x = "Comparison", y = "Kinase Activity Score") +
+    theme_bw()+ ylim(-3,5)+ theme(
+      legend.position = "bottom", 
+      axis.text.x=element_blank(),
+      axis.text.y = element_text(size = 7), 
+      axis.title = element_text(size=9, face = "bold"),
+      strip.text = element_text(size = 8),
+      plot.margin = margin(, 0.5, , , "cm"),
+      legend.key.size = unit(1, 'cm'),
+      legend.title = element_text(size=14), 
+        legend.text = element_text(size=14),
+      strip.text.x = element_text(margin = margin(.05, 0, .05, 0, "cm")))+
+    stat_compare_means(comparisons = my_comparisons, tip.length = 0.01, vjust = 0.55,
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 2), 
+                                          symbols = c("****", "***", "**", "*", "ns")), 
+                       label = "p.signif", method = "t.test", label.y = max(long_data$Score) * 1.0,
+                       step.increase = 0.25, hide.ns	= TRUE) + scale_x_discrete(guide = guide_axis(n.dodge = 2))
+  
+  if (group == "DTU") {
+    plot <- plot + scale_fill_manual(values = c("DMKN βγ-/-" = "#1b9e77", "WT" = "#d95f02"))
+  } else if (group == "CS") {
+    plot <- plot + scale_fill_manual(values = c("DMKN αβ-/-" = "#7570b3", "WT" = "#d95f02"))
+  }
+  plot = plot + ggtitle(title)
+  return(plot)
+}
+
+
+remove_terms_after_third_semicolon <- function(rowname) {
+  split_name <- strsplit(rowname, ";")[[1]]
+  new_name <- paste(split_name[1:4], collapse = ";")
+  return(new_name)
+}
+extract_flanking_seq <- function(named_FASTA, rownames_ppe) {
+  updated_rownames <- c()
+
+  for (rowname in rownames_ppe) {
+    split_name <- strsplit(rowname, ";")[[1]]
+    
+    # Remove the first and third terms if there are more than 4 terms
+    if (length(split_name) > 4) {
+      split_name <- split_name[-c(1, 3)]
+    }
+    # Remove any terms after the third semicolon
+    split_name <- split_name[1:4]
+    
+    rowname <- remove_terms_after_third_semicolon(rowname)
+    gene_id <- split_name[2]
+    position <- as.integer(gsub("\\D", "", split_name[3]))
+    matches <- grep(paste0(".*;", gene_id, "$"), names(named_FASTA), value = TRUE)
+
+    if (length(matches) > 0) {
+      protein_seq <- named_FASTA[matches[1]]
+
+      # Correct the position indexing
+      start <- max(1, position - 7)
+      stop <- min(nchar(protein_seq), position + 7)
+
+      flanking_seq <- substr(protein_seq, start, stop)
+      new_name <- paste(split_name[1], split_name[2], split_name[3], flanking_seq, sep = ";")
+      updated_rownames <- c(updated_rownames, new_name)
+    } else {
+      updated_rownames <- c(updated_rownames, rowname)
+    }
+  }
+
+  return(updated_rownames)
+}
+
+
+
+fasta_to_named_list <- function(fasta_lines) {
+  named_list <- list()
+  current_header <- ""
+
+  for (line in fasta_lines) {
+    if (startsWith(line, ">")) {
+      uniprot_id <- sub("^.*\\|(.+?)\\|.*$", "\\1", line)
+      gene_id <- sub("^.*GN=(\\S+).*?$", "\\1", line)
+      current_header <- paste(uniprot_id, gene_id, sep = ";")
+    } else {
+      named_list[[current_header]] <- line
+    }
+  }
+
+  return(named_list)
+}
+
+
+reformat_fasta_df <- function(fasta_df) {
+  reformatted_lines <- c()
+  current_sequence <- ""
+  
+  for (i in 1:nrow(fasta_df)) {
+    line <- as.character(fasta_df[i, 1])
+    if (!is.na(line)) {
+      if (startsWith(line, ">")) {
+        if (nchar(current_sequence) > 0) {
+          reformatted_lines <- c(reformatted_lines, current_sequence)
+          current_sequence <- ""
+        }
+        reformatted_lines <- c(reformatted_lines, line)
+      } else {
+        current_sequence <- paste0(current_sequence, line)
+      }
+    }
+  }
+  
+  if (nchar(current_sequence) > 0) {
+    reformatted_lines <- c(reformatted_lines, current_sequence)
+  }
+  
+  return(reformatted_lines)
+}
+rename_columns <- function(df) { new_colnames <- c("WT_NoSerum_Control", "WT_NoSerum_Treated", "WT_Serum_Control", "WT_Serum_Treated", "KO_DTU_NoSerum_Control", "KO_DTU_NoSerum_Treated", "KO_DTU_Serum_Control", "KO_DTU_Serum_Treated", "KO_CS_NoSerum_Control", "KO_CS_NoSerum_Treated", "KO_CS_Serum_Control", "KO_CS_Serum_Treated") 
+for (i in 1:length(new_colnames)) 
+  { 
+    start_col <- (i - 1) * 3 + 1 
+    end_col <- start_col + 2 
+    colnames(df)[start_col:end_col] <- paste(new_colnames[i], rep(1:3, 1), sep = "_Rep") } 
+  return(df) }
+
+
+rename_columns_2 <- function(df) {
+  new_colnames <- c("WT_NoSerum_Control", "WT_NoSerum_Treated",
+                    "KO_DTU_NoSerum_Control", "KO_DTU_NoSerum_Treated",
+                    "KO_CS_NoSerum_Control", "KO_CS_NoSerum_Treated")
+  for (i in 1:length(new_colnames)) {
+    start_col <- (i - 1) * 3 + 1
+    end_col <- start_col + 2
+    colnames(df)[start_col:end_col] <- paste(new_colnames[i], rep(1:3, 1), sep = "_Rep")
+  }
+  return(df)
+}
+
+calculate_log2fc_combined <- function(df) {
+    log2fc_df <- data.frame(matrix(ncol = 14, nrow = nrow(df)))
+  colnames(log2fc_df) <- c("WT_NoSerum", "WT_Serum", "KO_DTU_NoSerum", "KO_DTU_Serum", "KO_CS_NoSerum", "KO_CS_Serum",
+                            "KO_DTU_NoSerum_treated_WT_NoSerum_control", "KO_DTU_Serum_treated_WT_Serum_control",
+                            "KO_CS_NoSerum_treated_WT_NoSerum_control", "KO_CS_Serum_treated_WT_Serum_control",
+                            "KO_DTU_NoSerum_control_WT_NoSerum_control", "KO_DTU_Serum_control_WT_Serum_control",
+                            "KO_CS_NoSerum_control_WT_NoSerum_control", "KO_CS_Serum_control_WT_Serum_control")
+
+
+   # Define control and treated columns for each group
+  WT_NoSerum_control <- c(1, 2, 3)
+  WT_NoSerum_treated <- c(4, 5, 6)
+  
+  WT_Serum_control <- c(7, 8, 9)
+  WT_Serum_treated <- c(10, 11, 12)
+  
+  KO_DTU_NoSerum_control <- c(13, 14, 15)
+  KO_DTU_NoSerum_treated <- c(16, 17, 18)
+  
+  KO_DTU_Serum_control <- c(19, 20, 21)
+  KO_DTU_Serum_treated <- c(22, 23, 24)
+  
+  KO_CS_NoSerum_control <- c(25, 26, 27)
+  KO_CS_NoSerum_treated <- c(28, 29, 30)
+  
+  KO_CS_Serum_control <- c(31, 32, 33)
+  KO_CS_Serum_treated <- c(34, 35, 36)
+
+group_list <- list(WT_NoSerum = list(control = WT_NoSerum_control, treated = WT_NoSerum_treated),
+                   WT_Serum = list(control = WT_Serum_control, treated = WT_Serum_treated),
+                   KO_DTU_NoSerum = list(control = KO_DTU_NoSerum_control, treated = KO_DTU_NoSerum_treated),
+                   KO_DTU_Serum = list(control = KO_DTU_Serum_control, treated = KO_DTU_Serum_treated),
+                   KO_CS_NoSerum = list(control = KO_CS_NoSerum_control, treated = KO_CS_NoSerum_treated),
+                   KO_CS_Serum = list(control = KO_CS_Serum_control, treated = KO_CS_Serum_treated),
+                   KO_DTU_NoSerum_treated_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_DTU_NoSerum_treated),
+                   KO_DTU_Serum_treated_WT_Serum_control = list(control = WT_Serum_control, treated = KO_DTU_Serum_treated),
+                   KO_CS_NoSerum_treated_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_CS_NoSerum_treated),
+                   KO_CS_Serum_treated_WT_Serum_control = list(control = WT_Serum_control, treated = KO_CS_Serum_treated),
+                   KO_DTU_NoSerum_control_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_DTU_NoSerum_control),
+                   KO_DTU_Serum_control_WT_Serum_control = list(control = WT_Serum_control, treated = KO_DTU_Serum_control),
+                   KO_CS_NoSerum_control_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_CS_NoSerum_control),
+                   KO_CS_Serum_control_WT_Serum_control = list(control = WT_Serum_control, treated = KO_CS_Serum_control))
+
+for (i in seq(1, length(group_list))) {
+  treated_cols <- group_list[[names(group_list)[i]]][["treated"]]
+  control_cols <- group_list[[names(group_list)[i]]][["control"]]
+  # Filter out rows with NA values in either control or treated groups
+  no_na_rows <- !rowSums(is.na(df[, c(control_cols, treated_cols)]))
+  filtered_df <- df[no_na_rows, ]
+  
+  log2fc_df[no_na_rows, i] <- log2(rowMeans(filtered_df[, treated_cols]) / rowMeans(filtered_df[, control_cols]))
+}
+return(log2fc_df)
+}
+
+calculate_log2fc_combined_2 <- function(df) {
+  log2fc_df <- data.frame(matrix(ncol = 6, nrow = nrow(df)))
+  colnames(log2fc_df) <- c("WT_NoSerum", "KO_DTU_NoSerum", "KO_CS_NoSerum",
+                            "KO_DTU_NoSerum_treated_WT_NoSerum_control",
+                            "KO_CS_NoSerum_treated_WT_NoSerum_control",
+                            "KO_DTU_NoSerum_control_WT_NoSerum_control",
+                            "KO_CS_NoSerum_control_WT_NoSerum_control")
+
+  # Define control and treated columns for each group
+  WT_NoSerum_control <- c(1, 2, 3)
+  WT_NoSerum_treated <- c(4, 5, 6)
+  
+  KO_DTU_NoSerum_control <- c(7, 8, 9)
+  KO_DTU_NoSerum_treated <- c(10, 11, 12)
+  
+  KO_CS_NoSerum_control <- c(13, 14, 15)
+  KO_CS_NoSerum_treated <- c(16, 17, 18)
+
+  group_list <- list(WT_NoSerum = list(control = WT_NoSerum_control, treated = WT_NoSerum_treated),
+                     KO_DTU_NoSerum = list(control = KO_DTU_NoSerum_control, treated = KO_DTU_NoSerum_treated),
+                     KO_CS_NoSerum = list(control = KO_CS_NoSerum_control, treated = KO_CS_NoSerum_treated),
+                     KO_DTU_NoSerum_treated_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_DTU_NoSerum_treated),
+                     KO_CS_NoSerum_treated_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_CS_NoSerum_treated),
+                     KO_DTU_NoSerum_control_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_DTU_NoSerum_control),
+                     KO_CS_NoSerum_control_WT_NoSerum_control = list(control = WT_NoSerum_control, treated = KO_CS_NoSerum_control))
+
+  for (i in seq(1, length(group_list))) {
+    treated_cols <- group_list[[names(group_list)[i]]][["treated"]]
+    control_cols <- group_list[[names(group_list)[i]]][["control"]]
+    # Filter out rows with NA values in either control or treated groups
+    no_na_rows <- !rowSums(is.na(df[, c(control_cols, treated_cols)]))
+    filtered_df <- df[no_na_rows, ]
+    
+    log2fc_df[no_na_rows, i] <- log2(rowMeans(filtered_df[, treated_cols]) / rowMeans(filtered_df[, control_cols]))
+  }
+  return(log2fc_df)
+}
+create_histogram_subplots <- function(df) {
+  plot_list <- list()
+  for (i in 1:ncol(df)) {
+    p <- ggplot(df, aes_string(x = colnames(df)[i])) +
+      geom_histogram(binwidth = 0.1, fill = "blue", alpha = 0.7) +
+      theme_minimal() + annotate("text", x = max(3), y =max(10), 
+                                 label = print(nrow(na.omit(df)))) +
+      labs(x = colnames(df)[i], y = "Frequency", title = colnames(df)[i]) +
+      theme(plot.title = element_text(hjust = 0.5))
+    plot_list[[i]] <- p
+  }
+  grid.arrange(grobs = plot_list, ncol = 2)
+}
+
+display_min_max_values <- function(df) {
+  for (i in 1:ncol(df)) {
+    col_name <- colnames(df)[i]
+    min_value <- min(df[[col_name]], na.rm = TRUE)
+    max_value <- max(df[[col_name]], na.rm = TRUE)
+    cat(sprintf("Column: %s\nMin value: %f\nMax value: %f\n\n", col_name, min_value, max_value))
+  }
+}
+
+
+  
+create_group_plot <- function(data, group_mean_col, group_fc_col, title) {
+  
+  group_fc_values <- data[[group_fc_col]]
+  not_significant_count <- sum(group_fc_values >= -0.5849 & group_fc_values <= 0.5849, na.rm = TRUE)
+  downregulated_count  <- sum(group_fc_values < -0.5849, na.rm = TRUE)
+  upregulated_count <- sum(group_fc_values > 0.5849, na.rm = TRUE)
+  
+  ggplot(data, aes_string(x = group_fc_col, y = group_mean_col)) +
+    geom_point(aes_string(color = paste("ifelse(", group_fc_col, " > 0.5849, 'red', ifelse(", group_fc_col, " < -0.5849, 'blue', 'black'))")), alpha = 0.3, shape =16, size = 1) +
+    scale_color_identity() +
+    theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA), 
+        axis.title=element_text(size=8)) +
+    labs(x = title, y = "Log10 XIC", size =1.0) +
+    geom_point(aes(x = -6.75, y = log10(10^(10.0)), color = 'black'), size = 1.0, shape = 16) +
+    geom_point(aes(x = -6.75, y = log10(10^(9.5)), color = 'blue'), size = 1.0, shape = 16) +
+    geom_point(aes(x = -6.75, y = log10(10^(9.00)), color = 'red'), size = 1.0, shape = 16) +
+    annotate("text", x = -6.5, y = log10(10^(10.0)),
+             label = paste("Not significant: n=", not_significant_count),
+             hjust = 0, size = 1.75) +
+    annotate("text", x = -6.5, y = log10(10^(9.5)),
+             label = paste("Sig. down-regulated: n=", downregulated_count),
+             hjust = 0, size = 1.75) +
+    annotate("text", x = -6.5, y = log10(10^(9.00)),
+             label = paste("Sig. up-regulated: n=", upregulated_count),
+             hjust = 0, size = 1.75) +
+    annotate("text", x = 4.0, y = log10(10^(9.8)),
+             label = paste("N = 3"),
+             hjust = 0, size = 2.5) +
+    coord_cartesian(xlim = c(-6.5, 5), ylim = c(log10(10^(4.00)), log10(10^(10.00))))
+}
+
+  # Combine subplots into a grid
+  library(gridExtra)
+#grid.arrange(plot1, plot2, plot3, plot4, plot5, plot6, plot7, plot8, plot9, plot10, plot11, plot12, plot13, plot14, ncol = 3)
+#  options(repr.plot.width = 14, repr.plot.height =16)
+NoSerum_plot = grid.arrange(plot11, plot13, plot7, plot9, plot2, plot3, ncol = 2)
+Serum_plot = grid.arrange(plot12, plot14, plot8, plot10, plot5, plot6, ncol = 2)
+NoSerum_plot ; Serum_plot ; ggsave(filename=paste("NoSerum_plot", ".pdf"), plot = NoSerum_plot, device = "pdf") ; ggsave(filename=paste("Serum_plot", ".pdf"), plot = Serum_plot, device = "pdf")
+}
+
+fuzzPlot <- function (Tc, clustObj, mfrow = c(1, 1), cols, min.mem = 0, new.window = FALSE, llwd = 3, x_labels) {
+    clusterindex <- clustObj$cluster
+    memship <- clustObj$membership
+    memship[memship < min.mem] <- -1
+    
+    colorindex <- integer(dim(Tc)[[1]])
+    if (missing(cols)) {
+      cols <- c("#FF8F00", "#FFA700", "#FFBF00", "#FFD700", "#FFEF00", "#F7FF00", "#DFFF00", "#C7FF00", "#AFFF00", "#97FF00", "#80FF00", "#68FF00", "#50FF00", "#38FF00", "#20FF00", "#08FF00", "#00FF10", "#00FF28", "#00FF40", "#00FF58", "#00FF70", "#00FF87", "#00FF9F", "#00FFB7", "#00FFCF", "#00FFE7", "#00FFFF", "#00E7FF", "#00CFFF", "#00B7FF", "#009FFF", "#0087FF", "#0070FF", "#0058FF", "#0040FF", "#0028FF", "#0010FF", "#0800FF", "#2000FF", "#3800FF", "#5000FF", "#6800FF", "#8000FF", "#9700FF", "#AF00FF", "#C700FF", "#DF00FF", "#F700FF", "#FF00EF", "#FF0030", "#FF0018")
+    }
+    colorseq <- seq(0, 1, length = length(cols))
+    for (j in 1:max(clusterindex)) {
+      tmp <- Tc[clusterindex == j, ]
+      tmpmem <- memship[clusterindex == j, j]
+      if (((j - 1) %% (mfrow[1] * mfrow[2])) == 0) {
+        if (new.window) 
+          dev.new()
+        par(mfrow = mfrow)
+        if (sum(clusterindex == j) == 0) {
+          ymin <- -1
+          ymax <- +1
+        }
+        else {
+          ymin <- min(tmp)
+          ymax <- max(tmp)
+        }
+        plot(x = NA, xlim = c(1, dim(Tc)[[2]]), ylim = c(ymin, ymax), xaxt = "n", xlab = "", ylab = "Standardized Profile", main = paste("Cluster", j, "; size=", nrow(tmp)))
+        axis(1, at = 1:ncol(Tc), labels = x_labels)
+        
+       mean_tmp <- apply(tmp, 2, mean)
+
+      # Fit a linear model
+      fit <- lm(mean_tmp ~ log(1:ncol(Tc)))
+
+      
+      # Add the linear trend line to the plot
+      lines(predict(fit), col = 'black')
+      }
+      else {
+        if (sum(clusterindex == j) == 0) {
+          ymin <- -1
+          ymax <- +1
+        }
+        else {
+          ymin <- min(tmp)
+          ymax <- max(tmp)
+        }
+        
+        plot(x = NA, xlim = c(1, dim(Tc)[[2]]), ylim = c(ymin, ymax), xaxt = "n", xlab = "", ylab = "Standardized Profile", main = paste("Cluster", j, "; size=", nrow(tmp)))
+             axis(1, at = 1:ncol(Tc), labels = x_labels, las = 2, cex.axis = 1, tck = -0.01)
+             # Add the angled labels with custom size
+             
+        # Calculate the overall trend line
+        y_all <- c(tmp)
+        x_all <- c(rep(1:ncol(Tc), nrow(tmp)))
+        loess_fit <- loess(y_all ~ x_all)
+        # Add the overall trend line to the plot
+        lines(1:ncol(Tc), predict(loess_fit, data.frame(x_all = 1:ncol(Tc))), col = "black", lwd = 2, lty = 2)
+
+      }
+      if (!(sum(clusterindex == j) == 0)) {
+        for (jj in 1:(length(colorseq) - 1)) {
+          tmpcol <- (tmpmem >= colorseq[jj] & tmpmem <= colorseq[jj + 1])
+          if (sum(tmpcol) > 0) {
+            tmpind <- which(tmpcol)
+            for (k in 1:length(tmpind)) {
+              lines(tmp[tmpind[k], ], col = cols[jj], lwd = llwd)
+            }
+          }
+        }
+      }
+    }
+  }
+
+custom_clustOptimal <- function  (clueObj, rep = 5, user.maxK = NULL, visualize = TRUE, x_labels,...) {
+    bstPvalue <- 1
+    bst.clustObj <- c()
+    bst.evaluation <- c()
+    for (i in 1:rep) {
+        clustObj <- c()
+        if (clueObj$clustAlg == "cmeans") {
+            if (is.null(user.maxK)) {
+                clustObj <- cmeans(clueObj$Tc, centers = clueObj$maxK, 
+                  iter.max = 50, m = 1.25)
+            }
+            else {
+                clustObj <- cmeans(clueObj$Tc, centers = user.maxK, 
+                  iter.max = 50, m = 1.25)
+            }
+        }
+        else {
+            if (is.null(user.maxK)) {
+                clustObj <- kmeans(clueObj$Tc, centers = clueObj$maxK, 
+                  iter.max = 50)
+                clustObj$membership <- matrix(1, nrow = nrow(clueObj$Tc), 
+                  ncol = nrow(clustObj$centers))
+                rownames(clustObj$membership) <- names(clustObj$cluster)
+            }
+            else {
+                clustObj <- kmeans(clueObj$Tc, centers = user.maxK, 
+                  iter.max = 50)
+                clustObj$membership <- matrix(1, nrow = nrow(clueObj$Tc), 
+                  ncol = nrow(clustObj$centers))
+                rownames(clustObj$membership) <- names(clustObj$cluster)
+            }
+        }
+        evaluation <- clustEnrichment(clustObj, clueObj$annotation, 
+            clueObj$effectiveSize, clueObj$pvalueCutoff)
+        currentPvalue <- evaluation$fisher.pvalue
+        if (currentPvalue < bstPvalue) {
+            bstPvalue <- currentPvalue
+            bst.clustObj <- clustObj
+            bst.enrichList <- evaluation$enrich.list
+        }
+    }
+    if (visualize) {
+        fuzzPlot(clueObj$Tc, clustObj = bst.clustObj, x_labels = x_labels,...)
+    }
+    results <- list()
+    results$clustObj <- bst.clustObj
+    results$enrichList <- bst.enrichList
+    return(results)
+}
+
+custom_runClue = function (Tc, annotation, rep = 5, kRange = 2:10, clustAlg = "cmeans", 
+    effectiveSize = c(5, 100), pvalueCutoff = 0.05, alpha = 0.5) 
+{
+    means <- apply(Tc, 1, mean)
+    stds <- apply(Tc, 1, sd)
+    tmp <- sweep(Tc, 1, means, FUN = "-")
+    Tc <- sweep(tmp, 1, stds, FUN = "/")
+    annotation.intersect <- lapply(annotation, intersect, rownames(Tc))
+    annotation.filtered <- annotation.intersect[lapply(annotation.intersect, 
+        length) > 0]
+     # ... (same code as before, up to the repeat.list)
+
+  repeat.list <- mclapply(1:rep, function(rp) {
+    cat("repeat", rp, "\n")
+    enrichment <- c()
+    for (k in kRange) {
+      clustered <- c()
+      
+      # Perform na.omit on Tc before clustering
+      Tc_no_na <- na.omit(Tc)
+
+      if (clustAlg == "cmeans") {
+        clustered <- cmeans(Tc_no_na, centers = k, iter.max = 50, m = 1.25)
+      } else if (clustAlg == "kmeans") {
+        clustered <- kmeans(Tc_no_na, centers = k, iter.max = 50)
+      } else {
+        print("Unknown clustering algorithm specified. Using cmeans clustering instead")
+        clustered <- cmeans(Tc_no_na, centers = k, iter.max = 50, m = 1.25)
+      }
+      evaluate <- clustEnrichment(clustered, annotation.filtered, effectiveSize, pvalueCutoff)
+      fisher.pvalue <- evaluate$fisher.pvalue
+      escore <- -log10(fisher.pvalue) - alpha * nrow(clustered$centers)
+      enrichment <- c(enrichment, escore)
+    }
+    enrichment
+  })
+
+  # ... (same code as before, after the repeat.list)
+    x <- do.call(rbind, repeat.list)
+    x.normalize <- (x - min(x))/(max(x) - min(x))
+    rownames(x.normalize) <- paste("repeat", 1:rep, sep = "")
+    colnames(x.normalize) <- paste("k", kRange, sep = "=")
+    maxK <- which.max(apply(x.normalize, 2, median)) + (kRange[1] - 
+        1)
+    result <- list()
+    result$Tc <- Tc
+    result$annotation <- annotation.filtered
+    result$clustAlg <- clustAlg
+    result$effectiveSize <- effectiveSize
+    result$pvalueCutoff <- pvalueCutoff
+    result$evlMat <- x.normalize
+    result$maxK <- maxK
+    return(result)
+}
+
+
+custom_kinaseSubstratePred = function (phosScoringMatrices, ensembleSize = 10, top = 50, cs = 0.8, 
+    inclusion = 20, iter = 5, verbose = TRUE) 
+{
+    substrate.list = substrateList(phosScoringMatrices, top, 
+        cs, inclusion)
+    if (verbose) 
+        message("Predicting kinases for phosphosites:")
+    featureMat <- phosScoringMatrices$combinedScoreMatrix
+    predMatrix <- matrix(0, nrow = nrow(featureMat), ncol = length(substrate.list))
+    colnames(predMatrix) <- names(substrate.list)
+    rownames(predMatrix) <- rownames(featureMat)
+    tmp.list = lapply(seq(length(substrate.list)), function(i) {
+        positive.train <- featureMat[substrate.list[[i]], ]
+        positive.cls <- rep(1, length(substrate.list[[i]]))
+        negative.pool <- featureMat[!(rownames(featureMat) %in% 
+            substrate.list[[i]]), ]
+        if (verbose) 
+            message(paste(i, ".", sep = ""))
+        tmp_col = predMatrix[, i]
+        for (e in seq_len(ensembleSize)) {
+            negativeSize <- length(substrate.list[[i]])
+            idx <- sample(seq_len(nrow(negative.pool)), size = negativeSize, 
+                replace = TRUE)
+            negative.samples <- rownames(negative.pool)[idx]
+            negative.train <- featureMat[negative.samples, ]
+            negative.cls <- rep(2, length(negative.samples))
+            train.mat <- rbind(positive.train, negative.train)
+            cls <- as.factor(c(positive.cls, negative.cls))
+            names(cls) <- rownames(train.mat)
+            pred <- multiAdaSampling(train.mat, test.mat = featureMat, 
+                label = cls, kernelType = "radial", iter = iter)
+            tmp_col <- tmp_col[names(pred[, 1])] + pred[, 1]
+        }
+        tmp_col
+    })
+    predMatrix = matrix(unlist(tmp.list), ncol = ncol(predMatrix))
+    colnames(predMatrix) = names(substrate.list)
+    rownames(predMatrix) = rownames(featureMat)
+    predMatrix <- predMatrix/ensembleSize
+    if (verbose) 
+        message("done")
+    return(predMatrix)
+}
+
+multiAdaSampling <- function(train.mat, test.mat,
+    label, kernelType, iter = 5) {
+
+    X <- train.mat
+    Y <- label
+
+    model <- c()
+    prob.mat <- c()
+
+    for (i in seq_len(iter)) {
+        tmp <- X
+        rownames(tmp) <- NULL
+        model <- e1071::svm(tmp, factor(Y),
+            kernel = kernelType, probability = TRUE)
+        prob.mat <- attr(predict(model, train.mat,
+            decision.values = FALSE, probability = TRUE),
+            "probabilities")
+
+        X <- c()
+        Y <- c()
+        for (j in seq_len(ncol(prob.mat))) {
+            voteClass <- prob.mat[label == colnames(prob.mat)[j], ]
+            idx <- c()
+            idx <- sample(seq_len(nrow(voteClass)),
+                size = nrow(voteClass), replace = TRUE,
+                prob = voteClass[, j])
+            X <- rbind(X, train.mat[rownames(voteClass)[idx],])
+            Y <- c(Y, label[rownames(voteClass)[idx]])
+        }
+    }
+
+    pred <- attr(predict(model, newdata = test.mat,
+        probability = TRUE), "prob")
+    return(pred)
+}
+
+kinaseSubstrateHeatmap_modified <- function (phosScoringMatrices, top = 3, printPlot = NULL, filePath = "./kinaseSubstrateHeatmap.pdf", 
+    width = 10, height = 10) 
+{
+    utils::data("KinaseFamily", envir = environment())
+    sites <- c()
+    for (i in seq_len(ncol(phosScoringMatrices$combinedScoreMatrix))) {
+        sites <- union(sites, names(sort(phosScoringMatrices$combinedScoreMatrix[, 
+            i], decreasing = TRUE)[seq_len(top)]))
+    }
+    o <- intersect(colnames(phosScoringMatrices$combinedScoreMatrix), 
+        rownames(KinaseFamily))
+    annotation_col = data.frame(group = KinaseFamily[o, "kinase_group"], 
+        family = KinaseFamily[o, "kinase_family"])
+    rownames(annotation_col) <- o
+    if (is.null(printPlot) == TRUE) {
+      
+        pheatmap::pheatmap(phosScoringMatrices$combinedScoreMatrix[sites, 
+            ], annotation_col = annotation_col, cluster_rows = TRUE, 
+            cluster_cols = TRUE, fontsize = 6, show_row_dendrogram = FALSE, show_col_dendrogram = FALSE)
+      
+    }
+    else {
+        pdf(file = filePath, width = width, height = height)
+      
+        pheatmap::pheatmap(phosScoringMatrices$combinedScoreMatrix[sites, 
+            ], annotation_col = annotation_col, cluster_rows = TRUE, 
+            cluster_cols = TRUE, fontsize = 6, show_row_dendrogram = FALSE, show_col_dendrogram = FALSE)
+        
+        dev.off()
+    }
+}
+kinaseSubstrateHeatmap_modified <- function (phosScoringMatrices, top = 3, printPlot = NULL, filePath = "./kinaseSubstrateHeatmap.pdf", 
+    width = 10, height = 10) 
+{
+    utils::data("KinaseFamily", envir = environment())
+    sites <- c()
+    for (i in seq_len(ncol(phosScoringMatrices$combinedScoreMatrix))) {
+        sites <- union(sites, names(sort(phosScoringMatrices$combinedScoreMatrix[, 
+            i], decreasing = TRUE)[seq_len(top)]))
+    }
+    if (is.null(printPlot) == TRUE) {
+        pheatmap::pheatmap(phosScoringMatrices$combinedScoreMatrix[sites, 
+            ], cluster_rows = TRUE, 
+            cluster_cols = TRUE, fontsize = 6, show_row_dendrogram = FALSE, show_col_dendrogram = FALSE, show_rownames = FALSE, legend = FALSE)
+    }
+    else {
+        pdf(file = filePath, width = width, height = height)
+        pheatmap::pheatmap(phosScoringMatrices$combinedScoreMatrix[sites, 
+            ], cluster_rows = TRUE, 
+            cluster_cols = TRUE, fontsize = 6, show_row_dendrogram = FALSE, show_col_dendrogram = FALSE, show_rownames = FALSE, legend = FALSE)
+        dev.off()
+    }
+}
+siteAnnotate_modified <- function(site, phosScoringMatrices, predMatrix) {
+  od <- order(predMatrix[site, ], decreasing = FALSE)
+  kinases <- colnames(predMatrix)[od]
+  
+  par(mfrow = c(1, 4), mar = c(1, 5, 5, 1))
+  
+  barplot(predMatrix[site, kinases], las = 1, xlab = "Prediction score", 
+          col = "red3", main = "Prediction score", xlim = c(0, 1), horiz = TRUE, xaxt= "n")
+  axis(3)
+  barplot(phosScoringMatrices$combinedScoreMatrix[site, kinases], 
+          las = 1, main = "Combined score", col = "orange2", xlim = c(0, 1), horiz = TRUE,xaxt= "n")
+   axis(3)
+  barplot(phosScoringMatrices$motifScoreMatrix[site, kinases], 
+          las = 1, main = "Motif score", col = "green4", xlim = c(0, 1), horiz = TRUE,xaxt= "n")
+   axis(3)
+  barplot(phosScoringMatrices$profileScoreMatrix[site, kinases], 
+          las = 1, main = "Profile score", col = "lightblue3", 
+          xlim = c(0, 1), horiz = TRUE,xaxt= "n")
+   axis(3)
+  mtext(paste("Site =", site),                   # Add main title
+      side = 3,
+      line = - 2,
+      outer = TRUE)
+}
+
+siteAnnotate_modified_ggplot <- function(site, phosScoringMatrices, predMatrix) {
+  od <- order(predMatrix[site, ], decreasing = FALSE)
+  kinases <- colnames(predMatrix)[od]
+  
+  plot_data <- list(predMatrix[site, kinases], phosScoringMatrices$combinedScoreMatrix[site, kinases],
+                   phosScoringMatrices$motifScoreMatrix[site, kinases], phosScoringMatrices$profileScoreMatrix[site, kinases])
+  plot_types <- c("Prediction score", "Combined score", "Motif score", "Profile score")
+  plot_colors <- c("red3", "orange2", "green4", "lightblue3")
+  
+  plots <- list()
+  
+  for (i in 1:4) {
+    df <- data.frame(Kinase = factor(kinases, levels = kinases), Value = plot_data[[i]])
+    
+    p <- ggplot(df, aes(x = Kinase, y = Value, fill = factor(plot_types[i]))) +
+      geom_col() +
+      coord_flip() +
+      scale_fill_manual(values = plot_colors[i], guide = "none") +
+      theme_classic() +
+      theme(axis.title.y = element_blank(),
+            axis.text.y = element_text(size = 4),
+            axis.title.x = element_text(size = 0),
+            plot.title = element_text(hjust = 0.5, size = 7),
+            axis.text.x.top = element_text(angle = 45, hjust = 1)) +
+      labs(title = plot_types[i], x = NULL) +
+      scale_x_discrete(position = "top") +
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0)), limits = c(0, 1),breaks = c(0,1))
+    
+    plots[[i]] <- p
+  }
+  title1=text_grob(paste(site), size = 9, face = "bold")   #### this worked for me
+
+  grid.arrange(grobs = plots, ncol = 4, top = title1)
+}
+
+
+plotSignalomeMap_modified <- function(signalomes, color) {
+    df <- stack(signalomes$kinaseSubstrates)
+    modules <- signalomes$proteinModule
+    names(modules) <- unlist(lapply(strsplit(as.character(names(signalomes$proteinModules)), ";"), "[[", 1))
+    df$cluster <- modules[df$values]
+    df_balloon <- df
+    df_balloon <- na.omit(df_balloon) %>% dplyr::count(.data$cluster, .data$ind)
+    df_balloon$ind <- as.factor(df_balloon$ind)
+    df_balloon$cluster <- as.factor(df_balloon$cluster)
+    df_balloon <- tidyr::spread(df_balloon, .data$ind, .data$n)[, -1]
+    df_balloon[is.na(df_balloon)] <- 0
+    df_balloon <- do.call(rbind, lapply(seq(nrow(df_balloon)), function(x) {
+        res <- unlist(lapply(df_balloon[x, ], function(y) y/sum(df_balloon[x, ]) * 100))
+    }))
+    df_balloon <- reshape2::melt(as.matrix(df_balloon))
+    colnames(df_balloon) <- c("cluster", "ind", "n")
+    df_balloon <- df_balloon[df_balloon$n >= 0, ]
+    
+    # Function to find the last balloon for each group
+last_balloon_y <- function(group_data) {
+  max(group_data$y[group_data$x == max(group_data$x)])
+}
+
+# Add a new column to the dataframe containing the last balloon's y value for each group
+df_balloon$last_y <- sapply(unique(df_balloon$cluster), function(cluster) {
+  last_balloon_y(df_balloon[df_balloon$cluster == cluster, ])
+})[df_balloon$cluster]
+
+
+# Function to find the first balloon for each group
+first_balloon_y <- function(group_data) {
+  min(group_data$y[group_data$x == min(group_data$x)])
+}
+
+# Add a new column to the dataframe containing the first balloon's y value for each group
+df_balloon$first_y <- sapply(unique(df_balloon$cluster), function(cluster) {
+  first_balloon_y(df_balloon[df_balloon$cluster == cluster, ])
+})[df_balloon$cluster]  
+
+    g <- ggplot2::ggplot(df_balloon, aes(y = .data$ind, x = .data$cluster)) + 
+      
+        
+         #geom_text(aes(label = .data$cluster, x = .data$cluster, y = 0), angle = 90, hjust = 1, size = 3) +  # Show x-axis labels using geom_text
+        scale_color_manual(values = color) + 
+        scale_size_continuous(name = "% of phosphosites regulated by a kinase", range = c(2, 17)) + 
+        theme_classic() + 
+        theme(legend.position = "right", legend.direction = "vertical", legend.title = element_text(angle = 90),
+              axis.line = element_blank(), 
+              axis.title = element_blank(), 
+              axis.text.x = element_blank(),
+              axis.text.y = element_text(size = 14),
+              panel.grid.major.x = element_blank(), 
+              panel.grid.minor.x = element_blank()) +
+        guides(col = FALSE)  # Remove the legend for the kinases
+    # Add rectangles and text labels for module names on the x-axis
+    
+    
+    g <- g + geom_line(aes(group = .data$cluster, col = .data$ind), size = 0.5, linetype = "solid", color = "grey") +  # Connect the balloons within the horizontal line
+      geom_segment(data = df_balloon, aes(x = .data$cluster, xend = .data$cluster, y = .data$first_y, yend = .data$last_y, col = .data$ind), size = 0.5, linetype = "solid", show.legend = FALSE, color = "grey") 
+    
+# Add rectangles for module names on the x-axis
+for (i in unique(df_balloon$cluster)) {
+    g <- g + annotate("rect", xmin = as.numeric(i) - 0.45, xmax = as.numeric(i) + 0.45, ymin = -0.05 * max(df_balloon$n), ymax = 0, alpha = 0.7, fill = color[i])
+}
+
+    g = g +geom_point(aes(col = .data$ind, size = .data$n)) 
+  
+    
+# Use geom_segment() to draw lines from the x-axis to the last balloon for each group
+#g <- g + 
+    g
+}
+
+
+
+```
+#Figure 3
+## Signalome Formatting
+```{r Kinase-Substrate Relationship Analysis, eval=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+
+
+names_map <- c("20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_1_phospho" = "WT_Endogenous_Rep1",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_2_phospho" = "WT_Endogenous_Rep2",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_3_phospho" = "WT_Endogenous_Rep3",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_4_phospho" = "WT_Rescue_Rep1",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_5_phospho" = "WT_Rescue_Rep2",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_6_phospho" = "WT_Rescue_Rep3",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_13_phospho" = "DTU_Endogenous_Rep1",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_14_phospho" = "DTU_Endogenous_Rep2",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_15_phospho" = "DTU_Endogenous_Rep3",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_16_phospho" = "DTU_Rescue_Rep1",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_17_phospho" = "DTU_Rescue_Rep2",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_18_phospho" = "DTU_Rescue_Rep3",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_25_phospho" = "CS_Endogenous_Rep1",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_26_phospho" = "CS_Endogenous_Rep2",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_27_phospho" = "CS_Endogenous_Rep3",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_28_phospho" = "CS_Rescue_Rep1",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_29_phospho" = "CS_Rescue_Rep2",
+               "20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_30_phospho" = "CS_Rescue_Rep3")
+old_colnames <- colnames(Keratinocyte_Phosphoproteome_2024)[1:18]
+names_map <- c(names_map, setdiff(old_colnames, names(names_map)))
+# Use the names_map to rename the columns
+colnames(Keratinocyte_Phosphoproteome_2024)[1:18] <- names_map[old_colnames]
+renamed_df = Keratinocyte_Phosphoproteome_2024
+your_dataframe <- renamed_df %>%
+  mutate(Column_3 = str_extract(PTM_collapse_key, "(?<=_).*?(?=_)"),
+         Combined_Column = paste(PG.UniProtIds, PG.Genes, Column_3, PEP.StrippedSequence, sep=";"))
+your_dataframe <- your_dataframe %>%
+  distinct(Combined_Column, .keep_all = TRUE)
+
+ppe <- your_dataframe 
+class(ppe)
+dim((ppe))
+ppe_matrix <- as.matrix(ppe)
+grps = gsub("_Rep[0-9]", "", colnames(ppe_matrix[,c(1:18)]))
+
+
+rownames(ppe_matrix) = unique(ppe_matrix[,"Combined_Column"])
+
+
+ppe_matrix = ppe_matrix[,c(1:18)]
+ppe_filtered <- selectGrps(ppe_matrix, grps, 0.7, n=1) 
+rownames_original <- rownames(ppe_filtered)
+
+ppe_filtered <- apply(ppe_filtered, 2, as.numeric)
+
+
+rownames(ppe_filtered) <- rownames_original
+
+
+ppe_filter_log = na.omit(((log2(ppe_filtered))))
+dim(ppe_filter_log)
+
+
+FASTA = reformat_fasta_df(uniprot.proteome_Human)
+
+named_FASTA <- fasta_to_named_list(FASTA)
+
+strip_phos_site <- function(GOI) {
+     gene_IDs <- gsub("_.*", "", GOI)
+    return(gene_IDs)
+}
+#Assign flanking sequence to phos site instead of tryptic peptide
+rownames(ppe_filter_log) = extract_flanking_seq(named_FASTA,rownames(ppe_filter_log))
+
+ppe_filter_log = as.data.frame(ppe_filter_log)
+
+# Create a data.frame with the rownames as a new column
+ppe_filter_log_with_id <- ppe_filter_log %>%
+  rownames_to_column(var = "ID")
+
+# Modify the ID column to remove the ".1" at the end of the ID if it exists
+ppe_filter_log_with_id$ID <- gsub("(\\.1)$", "", ppe_filter_log_with_id$ID)
+
+# Group by the modified ID column and calculate the mean for each group
+ppe_filter_log_mean <- ppe_filter_log_with_id %>%
+  group_by(ID) %>%
+  summarise_all(mean)
+# Restore the rownames from the ID column
+ppe_filter_log_mean_matrix <- as.matrix(ppe_filter_log_mean)
+rownames(ppe_filter_log_mean_matrix) <- ppe_filter_log_mean_matrix[,1]
+
+# Convert columns to numeric using apply()
+numeric_columns <- apply(ppe_filter_log_mean_matrix, 2, as.numeric)
+# Create a new data frame or matrix with the numeric columns and original rownames
+numeric_ppe_filter_log <- as.matrix(numeric_columns)
+rownames(numeric_ppe_filter_log) <- rownames(ppe_filter_log_mean_matrix)
+
+ppe_filter_log_mean_matrix = numeric_ppe_filter_log
+ppe_filter_log_mean_matrix <- ppe_filter_log_mean_matrix[,-1,drop=FALSE]
+# Convert the data frame to a matrix
+ppe_filter_log = ppe_filter_log_mean_matrix
+rownames(ppe_filter_log) <- gsub(pattern = "\\.", replacement = ";", x = rownames(ppe_filter_log))
+
+#Re iterate to get the flanking sequence of doubles and tryptic peptides
+rownames(ppe_filter_log) = extract_flanking_seq(named_FASTA,rownames(ppe_filter_log))
+
+ppe_filter_log = as.data.frame(ppe_filter_log)
+
+# Create a data.frame with the rownames as a new column
+ppe_filter_log_with_id <- ppe_filter_log %>%
+  rownames_to_column(var = "ID")
+
+# Modify the ID column to remove the ".1" at the end of the ID if it exists
+ppe_filter_log_with_id$ID <- gsub("(\\.1)$", "", ppe_filter_log_with_id$ID)
+
+# Group by the modified ID column and calculate the mean for each group
+ppe_filter_log_mean <- ppe_filter_log_with_id %>%
+  group_by(ID) %>%
+  summarise_all(mean)
+# Restore the rownames from the ID column
+ppe_filter_log_mean_matrix <- as.matrix(ppe_filter_log_mean)
+rownames(ppe_filter_log_mean_matrix) <- ppe_filter_log_mean_matrix[,1]
+
+# Convert columns to numeric using apply()
+numeric_columns <- apply(ppe_filter_log_mean_matrix, 2, as.numeric)
+# Create a new data frame or matrix with the numeric columns and original rownames
+numeric_ppe_filter_log <- as.matrix(numeric_columns)
+rownames(numeric_ppe_filter_log) <- rownames(ppe_filter_log_mean_matrix)
+
+ppe_filter_log_mean_matrix = numeric_ppe_filter_log
+ppe_filter_log_mean_matrix <- ppe_filter_log_mean_matrix[,-1,drop=FALSE]
+# Convert the data frame to a matrix
+ppe_filter_log = ppe_filter_log_mean_matrix
+rownames(ppe_filter_log) <- gsub(pattern = "\\.", replacement = ";", x = rownames(ppe_filter_log))
+
+rownames_split <- strsplit(rownames(ppe_filter_log), ";")
+uniprot <- sapply(rownames_split, "[", 1)
+gene_symbols <- sapply(rownames_split, "[", 2)
+sites <- gsub("[STY]", "", sapply(rownames_split, "[", 3))
+sequences <- sapply(rownames_split, "[", 4)
+residues <- gsub("[0-9]", "", sapply(rownames_split, "[", 3))
+# Create PhosphoExperiment object
+
+ppe_noSerum <- PhosphoExperiment(assays = list(Quantification = ppe_filter_log),UniprotID = uniprot, Site = sites, GeneSymbol = gene_symbols, Residue = residues, Sequence = sequences)
+
+
+ppe = ppe_noSerum
+
+```
+
+##QC 
+###CorrPlot
+Quality control 1. Corrplot phos 2. Corrplot proteome
+```{r}
+
+# Read the data
+sampleCorrMatrix_global_SN <- read.delim2("sampleCorrelationMatrix_global.tsv")
+
+# Define the names map
+names_map_global <- c(
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_1.raw" = "WT_Endogenous_Rep1",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_2.raw" = "WT_Endogenous_Rep2",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_3.raw" = "WT_Endogenous_Rep3",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_4.raw" = "WT_Rescue_Rep1",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_5.raw" = "WT_Rescue_Rep2",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_6.raw" = "WT_Rescue_Rep3",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_13.raw" = "DTU_Endogenous_Rep1",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_14.raw" = "DTU_Endogenous_Rep2",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_15.raw" = "DTU_Endogenous_Rep3",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_16.raw" = "DTU_Rescue_Rep1",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_17.raw" = "DTU_Rescue_Rep2",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_18.raw" = "DTU_Rescue_Rep3",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_25.raw" = "CS_Endogenous_Rep1",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_26.raw" = "CS_Endogenous_Rep2",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_27.raw" = "CS_Endogenous_Rep3",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_28.raw" = "CS_Rescue_Rep1",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_29.raw" = "CS_Rescue_Rep2",
+  "X20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_30.raw" = "CS_Rescue_Rep3"
+)
+
+# Rename the columns
+colnames(sampleCorrMatrix_global_SN) <- names_map_global[colnames(sampleCorrMatrix_global_SN)]
+sampleCorrMatrix_global_SN <- sampleCorrMatrix_global_SN[,-1]
+
+# Convert the character matrix to a numeric matrix
+sampleCorrMatrix_global_SN_numeric <- apply(sampleCorrMatrix_global_SN, 2, as.numeric)
+
+# Check the structure of the new matrix
+str(sampleCorrMatrix_global_SN_numeric)
+
+# If it's now a numeric matrix, you can plot it with corrplot
+if (is.numeric(sampleCorrMatrix_global_SN_numeric)) {
+  corrplot(sampleCorrMatrix_global_SN_numeric, method = "color")
+}
+
+col <- colorRampPalette(c(rgb(0,0,1, alpha=0.5), rgb(1,0,0, alpha=0.5)))(200)
+rownames(sampleCorrMatrix_global_SN_numeric) <- colnames(sampleCorrMatrix_global_SN_numeric)
+
+pdf("CorrplotProteome.pdf",width = 4, height = 4)
+corrplot(sampleCorrMatrix_global_SN_numeric, method = "color", type = "upper", order = "original", 
+         tl.col = "black", tl.srt = 45, tl.cex = 0.6, cl.cex = 0.6, is.corr = FALSE, col = col, 
+         title = "Total Protein Levels Correlation")
+dev.off()
+
+sampleCorrMatrix_phos_SN <- read.delim2("sampleCorrelationMatrix_phospho.tsv")
+
+# Remove the first column
+sampleCorrMatrix_phos_SN <- sampleCorrMatrix_phos_SN[,-1]
+
+# Define the names map
+names_map_phos <- c(
+  "X" = "X",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_1_phospho.raw" = "WT_Endogenous_Rep1",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_2_phospho.raw" = "WT_Endogenous_Rep2",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_3_phospho.raw" = "WT_Endogenous_Rep3",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_4_phospho.raw" = "WT_Rescue_Rep1",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_5_phospho.raw" = "WT_Rescue_Rep2",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_6_phospho.raw" = "WT_Rescue_Rep3",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_13_phospho.raw" = "DTU_Endogenous_Rep1",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_14_phospho.raw" = "DTU_Endogenous_Rep2",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_15_phospho.raw" = "DTU_Endogenous_Rep3",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_16_phospho.raw" = "DTU_Rescue_Rep1",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_17_phospho.raw" = "DTU_Rescue_Rep2",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_18_phospho.raw" = "DTU_Rescue_Rep3",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_25_phospho.raw" = "CS_Endogenous_Rep1",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_26_phospho.raw" = "CS_Endogenous_Rep2",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_27_phospho.raw" = "CS_Endogenous_Rep3",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_28_phospho.raw" = "CS_Rescue_Rep1",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_29_phospho.raw" = "CS_Rescue_Rep2",
+  "X20221127_VC_140min_noFAIMS_1ug_HRMS1_DIA_sample_30_phospho.raw" = "CS_Rescue_Rep3"
+)
+
+# Convert the character matrix to a numeric matrix
+sampleCorrMatrix_phos_SN_numeric <- apply(sampleCorrMatrix_phos_SN, 2, as.numeric)
+
+# Rename the columns
+colnames(sampleCorrMatrix_phos_SN_numeric) <- names_map_phos[colnames(sampleCorrMatrix_phos_SN_numeric)]
+
+# Create the color palette
+col <- colorRampPalette(c(rgb(0,0,1, alpha=0.5), rgb(1,0,0, alpha=0.5)))(200)
+rownames(sampleCorrMatrix_phos_SN_numeric) <- colnames(sampleCorrMatrix_phos_SN_numeric)
+
+# Create correlation plots
+
+```
+
+###PieCharts
+PieChart for S/T/Y and for multiple phosphorylated  peptide
+```{r}
+# Create a new column that indicates whether PTM_collapse_key contains "S", "T", or "Y"
+renamed_df_test_pie <- renamed_df_test %>%
+  mutate(PTM_type = case_when(
+    str_detect(PTM_collapse_key, "S") ~ "S",
+    str_detect(PTM_collapse_key, "T") ~ "T",
+    str_detect(PTM_collapse_key, "Y") ~ "Y",
+    TRUE ~ "Other"
+  ))
+
+# renamed_df_test_pie <- renamed_df_test_pie %>%
+#   filter(!str_detect(PTM_collapse_key, "M[23]"))
+renamed_df_test_pie <- renamed_df_test_pie %>%
+  group_by(PTM_type) %>%
+  summarise(n = n())
+
+## Compute the position of labels
+renamed_df_test_pie <- renamed_df_test_pie %>%
+  arrange(desc(PTM_type)) %>%
+  mutate(prop = n / sum(n) * 100) %>%
+  mutate(ypos = cumsum(prop) - 0.5 * prop)
+
+# Create a pie chart for S/T/Y
+# Create a pie chart
+
+pSTY = ggplot(renamed_df_test_pie, aes(x = "", y = prop, fill = PTM_type)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  geom_text(aes(y = ypos, label = n), color = "white", size = 6) +
+  scale_fill_brewer(palette = "Set2") +
+  ggtitle("S/T/Y Relevant Phosphorylation Site") +
+  theme(plot.title = element_text(size = 20))
+
+
+#### Multiple phosphorylated peptides
+
+# Filter the data
+filtered_df <- renamed_df_test%>%
+  mutate(PTM_collapse_key = str_extract(PTM_collapse_key, "M[123]$")) %>%
+  filter(!is.na(PTM_collapse_key))
+
+# Compute the position of labels
+filtered_df <- filtered_df %>%
+  group_by(PTM_collapse_key) %>%
+  summarise(n = n()) %>%
+  arrange(desc(PTM_collapse_key)) %>%
+  mutate(prop = n / sum(n) * 100) %>%
+  mutate(ypos = cumsum(prop) - 0.5 * prop)
+
+
+# Create a pie chart
+pPHOS = ggplot(filtered_df, aes(x = "", y = prop, fill = PTM_collapse_key)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  geom_text(aes(y = ypos, label = n), color = "white", size = 6) +
+  scale_fill_brewer(palette = "Set2", labels = c("M1" = "Single Phosphorylated \nPeptides", "M2" = "Double Phosphorylated \nPeptides", "M3" = "Multiple Phosphorylated \nPeptides")) +
+  ggtitle("Single/Double/Multiple Phosphorylated Peptides") +
+  theme(plot.title = element_text(size = 20)) +
+  labs(fill = "Phosphorylation \nMultiplicity")
+
+```
+
+### Venn-Diagram
+Venn diagram Phos and proteome. Do the diagrams on quantified phos-sites. Also on the proteome
+ppe_filtered is the one with 0.7 in min 1 samples. Number is 14774 in both endogenous and rescue samples.
+
+Another approach. make the venn diagram with Keratinocyte_Phosphoproteome_2024 which has 15607 quantified phos sites.
+```{r}
+
+# Convert the columns to numeric
+Keratinocyte_Phosphoproteome_2024[, c(1:3, 7:9, 13:15)] <- lapply(Keratinocyte_Phosphoproteome_2024[, c(1:3, 7:9, 13:15)], as.numeric)
+
+# Identify the p-sites in each condition
+endogenous_p_sites <- list(
+  WT = which(!is.na(rowMeans(Keratinocyte_Phosphoproteome_2024[, c(1:3)], na.rm = TRUE))),
+  KO_DTU = which(!is.na(rowMeans(Keratinocyte_Phosphoproteome_2024[, c(7:9)], na.rm = TRUE))),
+  KO_CS = which(!is.na(rowMeans(Keratinocyte_Phosphoproteome_2024[, c(13:15)], na.rm = TRUE)))
+)
+names(endogenous_p_sites) <- ifelse(names(endogenous_p_sites) == "WT", "DMKN αβγ WT",
+                                    ifelse(names(endogenous_p_sites) == "KO_DTU", "DMKN βγ-/-",
+                                           ifelse(names(endogenous_p_sites) == "KO_CS", "DMKN αβ-/-", names(endogenous_p_sites))))
+
+
+# Convert the columns to numeric
+Keratinocyte_Phosphoproteome_2024[, c(4:6, 10:12, 16:18)] <- lapply(Keratinocyte_Phosphoproteome_2024[, c(4:6, 10:12, 16:18)], as.numeric)
+
+# Identify the p-sites in each condition
+treated_p_sites <- list(
+  WT = which(!is.na(rowMeans(Keratinocyte_Phosphoproteome_2024[, c(4:6)], na.rm = TRUE))),
+  KO_DTU = which(!is.na(rowMeans(Keratinocyte_Phosphoproteome_2024[, c(10:12)], na.rm = TRUE))),
+  KO_CS = which(!is.na(rowMeans(Keratinocyte_Phosphoproteome_2024[, c(16:18)], na.rm = TRUE)))
+)
+names(treated_p_sites) <- ifelse(names(treated_p_sites) == "WT", "DMKN αβγ WT",
+                                    ifelse(names(treated_p_sites) == "KO_DTU", "DMKN βγ-/-",
+                                           ifelse(names(treated_p_sites) == "KO_CS", "DMKN αβ-/-", names(treated_p_sites))))
+# Create the Venn diagrams
+# Create the Venn diagrams
+# ggVennDiagram(endogenous_p_sites, fill = c("transparent", "transparent", "transparent")) +
+#   ggtitle("Endogenous Conditions")
+# 
+# ggVennDiagram(treated_p_sites, fill = c("transparent", "transparent", "transparent")) +
+#   ggtitle("Treated Conditions")
+colors <- c("red", "green", "blue")
+endogenous_setsVENNS = ggvenn(endogenous_p_sites, fill_color = colors, stroke_size = 1, set_name_size = 4) +
+  ggtitle("Endogenous Conditions") 
+treated_setsVENNS = ggvenn(treated_p_sites, fill_color = colors, stroke_size = 1, set_name_size = 4) +
+  ggtitle("Treated Conditions") 
+
+
+
+# Define a list of sets
+endogenous_sets <- list(
+  WT_Endogenous = which(!is.na(rowMeans(global_PG_QUANT_test[, c("WT_Endogenous_1", "WT_Endogenous_2", "WT_Endogenous_3")], na.rm = TRUE))),
+  DTU_Endogenous = which(!is.na(rowMeans(global_PG_QUANT_test[, c("DTU_Endogenous_1", "DTU_Endogenous_2", "DTU_Endogenous_3")], na.rm = TRUE))),
+  CS_Endogenous = which(!is.na(rowMeans(global_PG_QUANT_test[, c("CS_Endogenous_1", "CS_Endogenous_2", "CS_Endogenous_3")], na.rm = TRUE)))
+)
+names(endogenous_sets) <- ifelse(names(endogenous_sets) == "WT_Endogenous", "DMKN αβγ WT",
+                                    ifelse(names(endogenous_sets) == "DTU_Endogenous", "DMKN βγ-/-",
+                                           ifelse(names(endogenous_sets) == "CS_Endogenous", "DMKN αβ-/-", names(endogenous_sets))))
+
+# Define a list of sets
+treated_sets <- list(
+  WT_Treated = which(!is.na(rowMeans(global_PG_QUANT_test[, c("WT_Treated_1", "WT_Treated_2", "WT_Treated_3")], na.rm = TRUE))),
+  DTU_Treated = which(!is.na(rowMeans(global_PG_QUANT_test[, c("DTU_Treated_1", "DTU_Treated_2", "DTU_Treated_3")], na.rm = TRUE))),
+  CS_Treated = which(!is.na(rowMeans(global_PG_QUANT_test[, c("CS_Treated_1", "CS_Treated_2", "CS_Treated_3")], na.rm = TRUE)))
+)
+
+# Rename the sets
+names(treated_sets) <- ifelse(names(treated_sets) == "WT_Treated", "DMKN αβγ WT",
+                              ifelse(names(treated_sets) == "DTU_Treated", "DMKN βγ-/-",
+                                     ifelse(names(treated_sets) == "CS_Treated", "DMKN αβ-/-", names(treated_sets))))
+
+
+
+
+endogenous_setsVENNS = ggvenn(endogenous_sets, fill_color = colors, stroke_size = 1, set_name_size = 4) +
+  ggtitle("Endogenous Conditions") 
+
+# Create the Venn diagrams
+treated_setsVENNS = ggvenn(treated_sets, fill_color = colors, stroke_size = 1, set_name_size = 4) +
+  ggtitle("Treated Conditions")
+
+
+```
+
+### Number Bargraph
+```{r}
+# Create a data frame
+df_numbers <- data.frame(
+  Names = c("Phosphosites after loc. prob. > 0.75", "Phosphosites > 0.7 in min. n > 1", "Fully Quantified Phosphosites"),
+  Values = c(nrow(Keratinocyte_Phosphoproteome_2024[complete.cases(Keratinocyte_Phosphoproteome_2024$PTM_collapse_key), ]), nrow(ppe_filtered), nrow(ppe_filter_log))
+)
+df_numbers$Names <- fct_reorder(df_numbers$Names, df_numbers$Values, .desc = TRUE)
+
+# Create a bar graph
+# Create a bar graph
+
+# Create a bar graph
+# Create a bar graph
+BarNumberS= ggplot(df_numbers, aes(x = Names, y = Values, fill = Names)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = Values), vjust = -0.3, size = 2) +
+  scale_fill_manual(values = c("black", "darkgrey", "grey")) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6, face = "bold"),
+    axis.text.y = element_text(size = 6, face = "bold"),
+    axis.title = element_text(size = 6, face = "bold"),
+    panel.background = element_blank(),
+    plot.background = element_blank()
+  ) +
+  xlab("") +
+  ylab("Number of Phosphosites")
+
+```
+
+```{r}
+process_signalomes_results <- function(Signalomes_results_DTU_Up) {
+  # Convert the character vector into a data frame
+  signalomes_results_DTU_Up_df <- data.frame(gene_and_phos_site = names(Signalomes_results_DTU_Up$proteinModules),
+                                             module_number = ifelse(Signalomes_results_DTU_Up$proteinModules == "noModule", NA, as.numeric(Signalomes_results_DTU_Up$proteinModules)),
+                                             stringsAsFactors = FALSE)
+
+  # Remove rows with NA module_number
+  signalomes_results_DTU_Up_df <- signalomes_results_DTU_Up_df[!is.na(signalomes_results_DTU_Up_df$module_number), ]
+
+  # Create a list to store the new data frames
+  module_dfs <- list()
+
+  # Iterate through the unique module numbers and create a data frame for each module
+  for (module_number in unique(signalomes_results_DTU_Up_df$module_number)) {
+    module_subset <- signalomes_results_DTU_Up_df[signalomes_results_DTU_Up_df$module_number == module_number, "gene_and_phos_site"]
+    module_dfs[[paste0("module_", module_number)]] <- data.frame(gene_and_phos_site = module_subset)
+  }
+
+  convert_to_entrez <- function(gene_and_phos_site) {
+    # Extract gene names
+    gene_names <- gsub(" .*", "", gene_and_phos_site)
+  
+    # Convert gene names to Entrez IDs
+    entrez_ids <- mapIds(org.Hs.eg.db,
+                         keys = gene_names,
+                         column = "ENTREZID",
+                         keytype = "SYMBOL",
+                         multiVals = "first")
+  
+    # Remove NA values
+    entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+  
+    return(entrez_ids)
+}
+  # Create a new list to store the Entrez IDs as character vectors
+  module_entrez_ids_chr <- list()
+
+  # Iterate through each module and convert gene names to Entrez IDs
+  for (module_name in names(module_dfs)) {
+    module_entrez_ids_chr[[module_name]] <- as.character(convert_to_entrez(gsub(" .*", "", module_dfs[[module_name]]$gene_and_phos_site)))
+  }
+
+  return(module_entrez_ids_chr)
+}
+```
+
+## Signalomics
+```{r warning=FALSE}
+ppe = ppe_noSerum 
+phosphoL6 = (SummarizedExperiment::assay(ppe, "Quantification")) # IS 3997 sites! If not iterate the flanking annotation
+# Define the desired order
+desired_order <- c("WT_Endogenous_Rep1", "WT_Endogenous_Rep2", "WT_Endogenous_Rep3", 
+                   "WT_Rescue_Rep1", "WT_Rescue_Rep2", "WT_Rescue_Rep3",
+                   "DTU_Endogenous_Rep1", "DTU_Endogenous_Rep2", "DTU_Endogenous_Rep3",
+                   "DTU_Rescue_Rep1", "DTU_Rescue_Rep2", "DTU_Rescue_Rep3",
+                   "CS_Endogenous_Rep1", "CS_Endogenous_Rep2", "CS_Endogenous_Rep3",
+                   "CS_Rescue_Rep1", "CS_Rescue_Rep2", "CS_Rescue_Rep3")
+
+# Reorder the columns
+phosphoL6 <- phosphoL6[, desired_order]
+grps = gsub("_Rep[0-9]", "", colnames(ppe))
+
+# Fit the model and contrasts
+design = model.matrix(~ grps - 1)
+colnames(design) <- c("KO_CS_NoSerum_Control", "KO_CS_NoSerum_Treated", "KO_DTU_NoSerum_Control", "KO_DTU_NoSerum_Treated", "WT_NoSerum_Control", "WT_NoSerum_Treated")
+# Update the contrasts for NoSerum data
+contrasts <- makeContrasts(
+  KO_WT_CS_NoSerum_fold_change = WT_NoSerum_Control- KO_CS_NoSerum_Control,
+  KO_WT_DTU_NoSerum_fold_change = WT_NoSerum_Control- KO_DTU_NoSerum_Control,
+  KO_CS_NoSerum_fold_change = KO_CS_NoSerum_Treated - KO_CS_NoSerum_Control,
+  KO_DTU_NoSerum_fold_change = KO_DTU_NoSerum_Treated - KO_DTU_NoSerum_Control,
+  KO_CS_control_WT_control_foldchange = KO_CS_NoSerum_Control - WT_NoSerum_Control,
+  KO_DTU_control_WT_control_foldchange = KO_DTU_NoSerum_Control - WT_NoSerum_Control,
+  TreatmentEffect_NoSerum_WT = WT_NoSerum_Treated - WT_NoSerum_Control,
+  GenotypeTreatmentEffect_NoSerum_DTU = KO_DTU_NoSerum_Treated - WT_NoSerum_Control,
+  GenotypeTreatmentEffect_NoSerum_CS = KO_CS_NoSerum_Treated - WT_NoSerum_Control,
+  InteractionEffect_CS = (KO_CS_NoSerum_Treated - WT_NoSerum_Treated) - (KO_CS_NoSerum_Control - WT_NoSerum_Control),
+  InteractionEffect_DTU = (KO_DTU_NoSerum_Treated - WT_NoSerum_Treated) - (KO_DTU_NoSerum_Control - WT_NoSerum_Control),
+  WT_NoSerum_Control = WT_NoSerum_Control - WT_NoSerum_Control,
+  levels = design
+)
+
+
+fit <- lmFit(SummarizedExperiment::assay(ppe, "Quantification"), design)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Updated tables
+table_names <- colnames(coef(fit2))
+tables <- lapply(table_names, function(x) topTable(fit2, number=Inf, coef=x))
+
+# Without relevant Fold change and p value filters
+idx_Up = fit2$coefficients[,c( "KO_WT_CS_NoSerum_fold_change")] > -Inf
+
+
+# Subset 'ppe' based on 'idx_Up' and 'idx_Down'
+
+phosphoL6.reg_Up <- (SummarizedExperiment::assay(ppe[idx_Up, ], "Quantification"))
+
+desired_order <- c("WT_Endogenous_Rep1", "WT_Endogenous_Rep2", "WT_Endogenous_Rep3", 
+                   "WT_Rescue_Rep1", "WT_Rescue_Rep2", "WT_Rescue_Rep3",
+                   "DTU_Endogenous_Rep1", "DTU_Endogenous_Rep2", "DTU_Endogenous_Rep3",
+                   "DTU_Rescue_Rep1", "DTU_Rescue_Rep2", "DTU_Rescue_Rep3",
+                   "CS_Endogenous_Rep1", "CS_Endogenous_Rep2", "CS_Endogenous_Rep3",
+                   "CS_Rescue_Rep1", "CS_Rescue_Rep2", "CS_Rescue_Rep3")
+
+# Reorder the columns
+phosphoL6.reg_Up <- phosphoL6.reg_Up[, desired_order]
+
+L6.phos.std_Up <- standardise(phosphoL6.reg_Up)
+#L6.phos.std_Down <- standardise(phosphoL6.reg_Down)
+
+rownames(L6.phos.std_Up) <- paste0(GeneSymbol(ppe), ";", Residue(ppe), Site(ppe), ";")[idx_Up]
+#rownames(L6.phos.std_Down) <- paste0(GeneSymbol(ppe), ";", Residue(ppe), Site(ppe), ";")[idx_Down]
+
+L6.phos.seq_Up <- Sequence(ppe)[idx_Up]
+#L6.phos.seq_Down <- Sequence(ppe)[idx_Down]
+
+# Check for empty or missing sequences in L6.phos.seq; absolutely necessary to run. There is a missing seq somewhere
+empty_or_missing_or_H1_seqs_Up <- sapply(L6.phos.seq_Up, function(x) x == "" || is.na(x) || grepl("S[0-9]", x))
+L6.phos.seq_Up <- L6.phos.seq_Up[!empty_or_missing_or_H1_seqs_Up]
+L6.phos.std_Up <- L6.phos.std_Up[!empty_or_missing_or_H1_seqs_Up,]
+
+
+
+L6.matrices_Up_CS <- kinaseSubstrateScore(substrate.list = PhosphoSite.human, 
+                                    mat = L6.phos.std_Up, seqs = L6.phos.seq_Up, 
+                                    numMotif = 5, numSub = 1, verbose = FALSE, species = "human")
+
+
+rownames(L6.matrices_Up_CS$combinedScoreMatrix) = gsub(";", " ", rownames(L6.matrices_Up_CS$combinedScoreMatrix))
+rownames(L6.matrices_Up_CS$profileScoreMatrix) = gsub(";", " ", rownames(L6.matrices_Up_CS$profileScoreMatrix))
+rownames(L6.matrices_Up_CS$motifScoreMatrix) = gsub(";", " ", rownames(L6.matrices_Up_CS$motifScoreMatrix))
+rownames(L6.matrices_Up_CS$ksActivityMatrix) = gsub(";", " ", rownames(L6.matrices_Up_CS$ksActivityMatrix))
+
+library(PhosR)
+data("KinaseFamily", package = "PhosR")
+
+kinaseHeatmap_Up_CS = (kinaseSubstrateHeatmap_modified(L6.matrices_Up_CS, top =1))
+
+
+motifScore_Up_CS <- L6.matrices_Up_CS$motifScoreMatrix
+profileScore_Up_CS <- L6.matrices_Up_CS$profileScoreMatrix
+combinedScore_Up_CS <- L6.matrices_Up_CS$combinedScoreMatrix
+kinaseActivityScore_Up_CS <- L6.matrices_Up_CS$ksActivityMatrix
+
+
+L6.predMat_Up_CS <- kinaseSubstratePred(L6.matrices_Up_CS, cs = 0.5, top = 50, inclusion = 20, iter= 5, verbose = FALSE)
+
+
+# ksActivityScore violin plots
+reshaped_data <- melt(L6.matrices_Up_CS$ksActivityMatrix, variable.name = "Condition", value.name = "Activity")
+# Convert Var2 to character type and split into two parts: Genotype and Treatment
+reshaped_data$Var2 <- as.character(reshaped_data$Var2)
+reshaped_data$Genotype <- sapply(strsplit(reshaped_data$Var2, "_"), function(x) {
+  if (x[1] == "WT") {
+    return(x[1])
+  } else {
+    return(x[1])
+  }
+})
+reshaped_data$Treatment <- sapply(strsplit(reshaped_data$Var2, "_"), function(x) {
+  if (x[2] %in% c("Endogenous", "Rescue")) {
+    return(x[2])
+  } else {
+    return(x[2])
+  }
+})
+# Replace the values in the Genotype and Treatment columns
+reshaped_data$Genotype[reshaped_data$Genotype == "WT"] <- "WT"
+reshaped_data$Genotype[reshaped_data$Genotype == "DTU"] <- "DMKN \U03B2\U03B3-/-"
+reshaped_data$Genotype[reshaped_data$Genotype == "CS"] <- "DMKN \U03B1\U03B2-/-"
+
+reshaped_data$Treatment[reshaped_data$Treatment == "Control"] <- "Endogenous"
+reshaped_data$Treatment[reshaped_data$Treatment == "Treated"] <- "Rescue"
+reshaped_data$Genotype <- factor(reshaped_data$Genotype, levels = c("WT", "DMKN \U03B2\U03B3-/-", "DMKN \U03B1\U03B2-/-"))
+reshaped_data$Treatment <- as.factor(reshaped_data$Treatment)
+
+ggplot(reshaped_data, aes(x = Genotype, y = Activity, fill = Treatment)) +
+  geom_violin() +
+  facet_wrap(~ Var1)  # Var1 is the kinase
+
+# Create the plot including ANOVA and pairwise t-tests
+ggplot(reshaped_data, aes(x = Genotype, y = Activity, fill = Treatment)) +
+  geom_violin() +
+  facet_wrap(~ Var1) +
+  stat_compare_means(method = "anova", label.y = 3) +      # Add global p-value
+  stat_compare_means(label = "p.signif", method = "t.test",
+                     ref.group = ".all.")    
+
+# Pairwise comparison against each treatment plus KRUSKAL WALIS test for genotype
+ggplot(reshaped_data, aes(x = Genotype, y = Activity, fill = Treatment)) +
+    geom_violin(width = 0.7, alpha = 0.9, color = "black") +
+    ggforce::geom_sina() +
+    facet_wrap(~ Var1) +
+    stat_compare_means(aes(group = Genotype), method = "kruskal.test", label.y = 4.5, label.size = 6) +
+    stat_compare_means(aes(group = Treatment), method = "t.test", label.y = 3.5, label.size = 6, label = "p.signif") +  # For p-value labels
+
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+          axis.text.y = element_text(size = 12),
+          strip.text = element_text(size = 14, face = "bold"),
+          legend.title = element_text(size = 14, face = "bold"),
+          legend.text = element_text(size = 12)) +
+    labs(x = "Genotype", y = "Kinase Activity Score", fill = "Treatment")
+
+# Perform pairwise t-tests for each Genotype and Kinase
+kruskal_results <- reshaped_data %>%
+  group_by(Var1) %>%
+  do({
+    data.frame(p_value = kruskal.test(.$Activity ~ .$Genotype)$p.value)
+  })
+anova_results <- reshaped_data %>%
+  group_by(Var1) %>%
+  do({
+    data.frame(p_value = summary(aov(.$Activity ~ .$Genotype))[[1]]["Pr(>F)"][1,])
+  })
+# Perform pairwise t-test for each Treatment and Kinase
+ttest_results <- reshaped_data %>%
+  group_by(Var1) %>%
+  do({
+    p_matrix <- pairwise.t.test(.$Activity, .$Treatment, p.adjust.method = "BH")$p.value
+    data.frame(Treatment1 = rownames(p_matrix), Treatment2 = colnames(p_matrix), p_value = as.vector(p_matrix))
+  })
+
+
+# Filter the kinases where the p-value is significant in either test
+significant_kinases <- anova_results %>% 
+  filter(p_value < 0.05) %>% 
+  .$Var1 %>% 
+  unique()
+
+# Filter the reshaped_data to include only the significant kinases
+reshaped_data <- reshaped_data %>%
+  filter(Var1 %in% significant_kinases)
+
+
+
+ksActivityScore = ggplot(reshaped_data, aes(x = Genotype, y = Activity, fill = Treatment)) +
+    geom_violin(width = 0.7, alpha = 0.9, color = "black", size =0.2)+
+    ggforce::geom_sina(size = 0.1)+
+    facet_wrap(~ Var1) +
+    stat_compare_means(aes(group = Genotype), method = "aov", label.y = 2.5, size = 1.2) +
+    stat_compare_means(aes(group = Treatment), method = "t.test", label.y = 1.8, size = 2, label = "p.signif", hide.ns = T) +  # For p-value labels
+
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
+          axis.text.y = element_text(size = 6),
+          strip.text = element_text(size = 6, face = "bold"),
+          legend.title = element_text(size = 6, face = "bold"),
+          legend.text = element_text(size = 6),
+          text = element_text(size = 6),
+          legend.position = "bottom") +  # Move the legend to the bottom
+    labs(x = "Genotype", y = "Kinase Activity Score", fill = "Treatment") 
+
+print(ksActivityScore)
+
+
+
+
+L6.matrices_Up_CS_filter= L6.matrices_Up_CS
+
+# Filter the columns of L6.matrices_Up_CS$combinedScoreMatrix to include only the significant kinases
+L6.matrices_Up_CS_filter$combinedScoreMatrix <- L6.matrices_Up_CS_filter$combinedScoreMatrix[, colnames(L6.matrices_Up_CS_filter$combinedScoreMatrix) %in% significant_kinases]
+L6.matrices_Up_CS_filter$profileScoreMatrix <- L6.matrices_Up_CS_filter$profileScoreMatrix[, colnames(L6.matrices_Up_CS_filter$profileScoreMatrix) %in% significant_kinases]
+L6.matrices_Up_CS_filter$motifScoreMatrix <- L6.matrices_Up_CS_filter$motifScoreMatrix[, colnames(L6.matrices_Up_CS_filter$motifScoreMatrix) %in% significant_kinases]
+L6.matrices_Up_CS_filter$ksActivityMatrix <- L6.matrices_Up_CS_filter$ksActivityMatrix[, colnames(L6.matrices_Up_CS_filter$ksActivityMatrix) %in% significant_kinases]
+
+# Filter the columns of L6.predMat_Up_CS to include only the significant kinases
+filtered_L6.pred_matrix <- kinaseSubstratePred(L6.matrices_Up_CS_filter, cs = 0.5, top = 50, inclusion = 20, iter= 5, verbose = FALSE)
+
+
+# Remove rows with missing names from L6.predMat_Up_CS
+filtered_L6.pred_matrix <- filtered_L6.pred_matrix[!is.na(rownames(filtered_L6.pred_matrix)), ]
+filtered_L6.pred_matrix <- filtered_L6.pred_matrix[!duplicated(rownames(filtered_L6.pred_matrix)), ]
+
+
+
+PhosR:::.kinaseNetwork(filtered_L6.pred_matrix, L6.matrices_Up_CS_filter, threskinaseNetwork=0.5, kinase_signalome_color)
+PhosR:::.phosphositeClusters(L6.matrices_Up_CS_filter, verbose=T)
+
+
+Signalomes_results_ENDO_CS_Up_filtered <- Signalomes(KSR=L6.matrices_Up_CS_filter, 
+                                predMatrix=filtered_L6.pred_matrix, filter =T,
+                                exprsMat=L6.phos.std_Up, module_res = 8,threskinaseNetwork= 0.95,
+                                signalomeCutoff = 0.5, KOI = "SRC", verbose = T)
+
+
+
+moduleUp_entrez <- process_signalomes_results(Signalomes_results_ENDO_CS_Up_filtered)
+max_length <- max(sapply(moduleUp_entrez, length))
+module_df <- as.data.frame(matrix(NA, nrow = max_length, ncol = length(moduleUp_entrez)))
+colnames(module_df) <- names(moduleUp_entrez)
+
+# Fill the data frame with the IDs from each module
+for (module_name in names(moduleUp_entrez)) {
+  module_df[1:length(moduleUp_entrez[[module_name]]), module_name] <- moduleUp_entrez[[module_name]]
+}
+
+
+# Convert the wide data frame to a long format
+long_module_df <- module_df %>%
+  gather(module, Entrez, everything(), na.rm = TRUE)
+library(clusterProfiler) ; library(enrichplot) ; library(org.Hs.eg.db)
+
+# Use compareCluster with the reshaped data frame
+ENDO_CS_UP_cluster_significant_GO <- compareCluster(Entrez ~ module, data = long_module_df, fun = "enrichGO", OrgDb = org.Hs.eg.db,
+                                 ont = "ALL", pAdjustMethod = "fdr", pvalueCutoff = 0.01,
+                                 qvalueCutoff = 0.05, minGSSize = 20, readable = TRUE)
+
+# Rename the modules; adjust depending on howm any clusters were generated
+new_module_names <- c("1", "2", "3","4", "5", "6", "7", "8")
+# Update the Cluster column in the compare_result object
+ENDO_CS_UP_cluster_significant_GO@compareClusterResult <- ENDO_CS_UP_cluster_significant_GO@compareClusterResult %>%
+  mutate(Cluster = str_replace(Cluster, "module_", ""))
+
+ENDO_CS_UP_cluster_significant_clusterPLOT = dotplot(ENDO_CS_UP_cluster_significant_GO, font.size = 6, size = NULL, x = "GeneRatio",label_format =50, showCategory=3,includeAll = T,split="ONTOLOGY", shape =T)  +
+  scale_size_continuous(range = c(1, 4)) + 
+   theme( strip.text = element_text(face="bold"), axis.text.x = element_text(face="bold", size =6),
+          axis.title.x = element_text(size=6,face="bold" ), 
+           legend.key.size = unit(0.5, "cm"),
+    legend.text=element_text(size=6),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    text = element_text(size=6),
+    strip.background = element_rect()) + labs(x="Gene Ratio") +facet_grid(ONTOLOGY~.,scales = "free")
+
+
+```
+
+## Connecting kinases to GO
+```{r}
+
+# Filter rows where 'Description' contains any of the terms
+filtered_GO_terms <- ENDO_CS_UP_cluster_significant_GO@compareClusterResult[grep("cadherin binding|adherens junction", ENDO_CS_UP_cluster_significant_GO@compareClusterResult$Description), ]
+
+# Split 'geneID' column into lists of genes
+gene_lists_per_term <- strsplit(filtered_GO_terms$geneID, "/")
+
+# Find the intersecting genes
+intersecting_genes_among_terms <- Reduce(intersect, gene_lists_per_term)
+all_genes <- unlist(gene_lists_per_term)
+
+# Count the frequency of each gene
+gene_frequency <- table(all_genes)
+
+# Convert the table to a data frame and sort by frequency
+gene_frequency_df <- data.frame(Gene = names(gene_frequency), Frequency = as.integer(gene_frequency))
+gene_frequency_df <- gene_frequency_df[order(-gene_frequency_df$Frequency, gene_frequency_df$Gene), ]
+# Get the column names from gene_frequency
+all_genes <- names(gene_frequency)
+
+# Filter rows of L6.matrices_Up_CS_filter$combinedScoreMatrix based on all_genes
+filtered_score_matrix <- L6.matrices_Up_CS_filter$combinedScoreMatrix[grep(paste(all_genes, collapse="|"), rownames(L6.matrices_Up_CS_filter$combinedScoreMatrix)), ]
+
+# Extract the phosphosite part from the row names of filtered_score_matrix
+phosphosites <- sapply(strsplit(rownames(filtered_score_matrix), " "), `[`, 2)
+# Create a new data frame to store the results
+kinase_sites_df <- data.frame()
+
+# Create phosphosite_df from filtered_score_matrix
+phosphosite_df <- data.frame(
+  Gene = sapply(strsplit(rownames(filtered_score_matrix), " "), `[`, 1),
+  Phosphosite = phosphosites,
+  
+  stringsAsFactors = FALSE
+)
+# Loop over the kinaseSubstrates list
+for (kinase in names(Signalomes_results_ENDO_CS_Up_filtered$kinaseSubstrates)) {
+  # Get the substrates for the current kinase
+  kinase_substrates <- Signalomes_results_ENDO_CS_Up_filtered$kinaseSubstrates[[kinase]]
+  
+  # Loop over the rows of phosphosite_df
+  for (i in 1:nrow(phosphosite_df)) {
+    # Create a string that matches the format in kinaseSubstrates
+    phosphosite_string <- paste0(phosphosite_df$Gene[i], " ", phosphosite_df$Phosphosite[i], " ")
+    
+    # Check if phosphosite_string is in kinase_substrates
+    if (phosphosite_string %in% kinase_substrates) {
+      # If it is, add a row to kinase_sites_df
+      kinase_sites_df <- rbind(kinase_sites_df, data.frame(Kinase=kinase, Gene=phosphosite_df$Gene[i], Phosphosite=phosphosite_df$Phosphosite[i]))
+    }
+  }
+}
+# Get the cluster information
+clusters <- Signalomes_results_ENDO_CS_Up_filtered$proteinModules
+
+# Split the names of clusters into Gene and Phosphosite
+cluster_info <- data.frame(Gene = sapply(strsplit(names(clusters), " "), `[`, 1), 
+                           Phosphosite = sapply(strsplit(names(clusters), " "), `[`, 2), 
+                           Cluster = as.character(clusters))
+# Function to annotate phosphosites with clusters
+annotate_with_clusters <- function(row) {
+  phosphosites <- strsplit(row$Phosphosite, ", ")[[1]]
+  clusters <- sapply(phosphosites, function(phosphosite) {
+    cluster <- cluster_info$Cluster[cluster_info$Gene == row$Gene & cluster_info$Phosphosite == phosphosite]
+    if (length(cluster) > 0) {
+      return(paste0(phosphosite, " (Cluster ", cluster, ")"))
+    } else {
+      return(phosphosite)
+    }
+  })
+  return(paste(clusters, collapse = ", "))
+}
+
+# Merge phosphosite_df with cluster_info
+phosphosite_df_with_clusters <- merge(phosphosite_df, cluster_info, by = c("Gene", "Phosphosite"), all.x = TRUE)
+
+# Merge phosphosite_df_with_clusters with kinase_sites_df
+phosphosite_df_with_clusters <- merge(phosphosite_df_with_clusters, kinase_sites_df, by = c("Gene", "Phosphosite"), all.x = TRUE)
+
+# Annotate phosphosites with clusters and kinases
+phosphosite_df_with_clusters$Phosphosite <- paste(phosphosite_df_with_clusters$Phosphosite, " (", phosphosite_df_with_clusters$Cluster, "|", phosphosite_df_with_clusters$Kinase, ")", sep="")
+
+# Aggregate phosphosites for each gene
+aggregated_phosphosites <- aggregate(Phosphosite ~ Gene, phosphosite_df_with_clusters, paste, collapse = ", ")
+
+# Merge gene_frequency_df with aggregated_phosphosites
+merged_df_with_clusters <- merge(gene_frequency_df, aggregated_phosphosites, by = "Gene")
+merged_df_with_clusters <- rename(merged_df_with_clusters, Protein = Gene, `Phosphosite (Cluster|Kinase)` = Phosphosite)
+# Sort merged_df by Frequency and select the top 10 rows
+top_10_merged_df <- head(merged_df_with_clusters[order(-merged_df_with_clusters$Frequency), ], 10)
+
+# Select the first 10 phosphosites in the `Phosphosite (Cluster|Kinase)` column
+top_10_merged_df <- top_10_merged_df %>%
+  mutate(`Phosphosite (Cluster|Kinase)` = sapply(strsplit(`Phosphosite (Cluster|Kinase)`, ", "), function(x) str_c(head(x, 10), collapse = ", ")))
+
+# Convert top_10_merged_df to a LaTeX table
+latex_table <- xtable(top_10_merged_df)
+
+# Print the LaTeX table
+print(latex_table, type = "latex", include.rownames=FALSE)
+
+
+# Create a copy of the data frame for export
+export <- L6.matrices_Up_CS$combinedScoreMatrix
+export <- as.data.frame(export)
+
+# Add row names as a new column
+export <- cbind(Phosphosite = rownames(export), export)
+reshaped_data_for_export <- rename(reshaped_data, Kinases = Var1, Sample = Var2)
+merged_df_with_clusters_export = rename(merged_df_with_clusters, 'Frequency among Clusters and GO Terms'= Frequency)
+# Install the writexl package if not already installed
+if (!require(writexl)) {
+  install.packages("writexl")
+}
+
+
+kinases_dataframe <- aggregated_phosphosites %>%
+    mutate(PhosphositeList = strsplit(Phosphosite, ", ")) %>%
+    unnest(PhosphositeList) %>%
+    separate(PhosphositeList, into = c("Phosphosite", "ClusterKinase"), sep = " \\(") %>%
+    separate(ClusterKinase, into = c("Cluster", "Kinase"), sep = "\\|") %>%
+    mutate(Kinase = sub("\\)", "", Kinase))
+
+
+kinases_dataframe <- kinases_dataframe %>%
+  group_by(Gene, Kinase) %>%
+  mutate(AffectedSites = paste(Phosphosite, collapse = ", ")) %>%
+  ungroup()
+
+kinase_counts_per_protein <- kinases_dataframe %>%
+  group_by(Gene, Kinase, AffectedSites) %>%
+  summarise(KinaseCount = n())
+
+# Sort the dataframe by the KinaseCount column in descending order
+sorted_kinase_counts_per_protein <- kinase_counts_per_protein %>%
+  arrange(desc(KinaseCount))
+
+# Convert the dataframe to a LaTeX table
+latex_table_kinases <- xtable(top_5_kinase_counts_per_protein <- kinase_counts_per_protein %>%
+  arrange(desc(KinaseCount)) %>%
+  head(5))
+print(latex_table_kinases, type = "latex", include.rownames=FALSE)
+
+```
+
+
+
+## Heatmap
+```{r}
+ppe_volcano = ppe_noSerum
+rownames(ppe_volcano) <- gsub("(.*?);(.*?);([A-Z])([0-9]+);([A-Z]+)", "\\2 \\3\\4 ", rownames(ppe_volcano))
+
+
+# Extract the Quantification assay
+quantification <- assays(ppe_volcano)$Quantification
+original_colnames <- colnames(quantification)
+
+new_colnames <- gsub("CS", "DMKN αβ-/-", gsub("DTU", "DMKN βγ-/-", gsub("WT", "WT DMKN αβγ", gsub("_", " ", gsub("Rep", "", gsub("Endogenous", "Endogenous", gsub("Rescue", "Rescue", gsub("NoSerum_", "", original_colnames))))))))
+colnames(quantification) <- new_colnames
+
+# Apply Z-score standardization
+z_scores <- t(apply(quantification, 1, scale))
+# Convert the matrix to a data frame
+z_scores_df <- as.data.frame(z_scores)
+
+# Set the column names
+colnames(z_scores_df) <- new_colnames
+# Define the new order
+new_order <- c(grep("WT DMKN αβγ Endogenous", colnames(z_scores_df), value = TRUE),
+               grep("DMKN βγ-/- Endogenous", colnames(z_scores_df), value = TRUE),
+               grep("DMKN αβ-/- Endogenous", colnames(z_scores_df), value = TRUE),
+               grep("WT DMKN αβγ Rescue", colnames(z_scores_df), value = TRUE),
+               grep("DMKN βγ-/- Rescue", colnames(z_scores_df), value = TRUE),
+               grep("DMKN αβ-/- Rescue", colnames(z_scores_df), value = TRUE))
+
+# Reorder the columns
+z_scores_df <- z_scores_df[, new_order]
+
+
+# Create an annotation data frame
+annotation_df <- data.frame(
+  Condition = factor(rep(c("WT DMKN αβγ Endogenous", "DMKN βγ-/- Endogenous", "DMKN αβ-/- Endogenous", 
+                           "WT DMKN αβγ Rescue", "DMKN βγ-/- Rescue", "DMKN αβ-/- Rescue"), each = 3))
+)
+rownames(annotation_df) <- colnames(z_scores_df)
+
+# Define colors for the annotation
+annotation_colors = list(
+  Condition = c("WT DMKN αβγ Endogenous" = "blue", "DMKN βγ-/- Endogenous" = "green", 
+                "DMKN αβ-/- Endogenous" = "red", "WT DMKN αβγ Rescue" = "cyan", 
+                "DMKN βγ-/- Rescue" = "magenta", "DMKN αβ-/- Rescue" = "yellow")
+)
+
+
+
+```
+
+```{r}
+
+# Import the long to wide OG df that was created in the previous section with a 0 loc filter in perseus
+phos_quant_afterPerseus_Qvaluefilter0_01_Wide <- read_delim("20221127_HRMS1_DIA_DMKN_KO_ENDO_RESCUE_Rstudio_Vcan_report_WO_PeakShape_PeptideCollapse_Wide.tsv", 
+    delim = "\t", escape_double = FALSE, 
+    comment = "#", trim_ws = TRUE)
+
+# Import the long to wide MS1 peak shape filter df that was created in the previous section with a 0 loc filter in perseus
+phos_quant_afterPerseus_Qvaluefilter0_01_W_PeakShape_Wide <- read_delim("20221127_HRMS1_DIA_DMKN_KO_ENDO_RESCUE_Rstudio_Vcan_report_W_PeakShape_PeptideCollapse_Wide.tsv", 
+    delim = "\t", escape_double = FALSE, 
+    comment = "#", trim_ws = TRUE)
+
+
+phos_quant_afterPerseus_Qvaluefilter0_01_Wide_truncated = phos_quant_afterPerseus_Qvaluefilter0_01_Wide %>%
+  mutate(across(where(is.character), substr, start = 1, stop = 32767))
+phos_quant_afterPerseus_Qvaluefilter0_01_W_PeakShape_Wide_truncated = phos_quant_afterPerseus_Qvaluefilter0_01_W_PeakShape_Wide %>%
+  mutate(across(where(is.character), substr, start = 1, stop = 32767))
+phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4_truncated = phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4 %>%
+  mutate(across(where(is.character), substr, start = 1, stop = 32767))
+# Get the second data frame and convert it to a data frame
+ppe_quantification <- data.frame(assay(ppe, "Quantification"))
+
+# Add row names as a new column
+ppe_quantification$RowNames <- rownames(assay(ppe, "Quantification"))
+# Combine data frames in a list
+data_list <- list("Phos_Peptides" = phos_quant_afterPerseus_Qvaluefilter0_01_Wide_truncated, 
+                  "Phos_Peptides_PeakFilter" = phos_quant_afterPerseus_Qvaluefilter0_01_W_PeakShape_Wide_truncated, 
+                  "Phos_Sites" = phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4_truncated, 
+                  "Phos_Sites_FullQuant" = ppe_quantification)
+
+#
+```
+
+```{r}
+
+# Extract the phosphosite from the first data frame
+phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4_truncated$phosphosite <- sapply(strsplit(as.character(phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4_truncated$PTM_collapse_key), "_"), `[`, 2)
+
+# Extract the phosphosite from the second data frame
+ppe_quantification$phosphosite <- sapply(strsplit(as.character(rownames(assay(ppe, "Quantification"))), ";"), `[`, 3)
+
+# Now find the common phosphosites
+common_phosphosites <- intersect(phos_quant_afterPerseus_Qvaluefilter0_01peakfilter0_6_localizationFilter0_75_V4_truncated$phosphosite, df2$phosphosite)
+
+# Filter both data frames to only keep the common phosphosites
+df1_filtered <- df1[df1$phosphosite %in% common_phosphosites, ]
+df2_filtered <- df2[df2$phosphosite %in% common_phosphosites, ]
+```
+
+##2D Proteome
+```{r}
+
+# Import the 2D proteome data heatmap data
+proteome_2D <- read.delim2("heatmap_proteome_fromSN.tsv")
+
+# Remove the 'X' column
+proteome_2D <- proteome_2D[,-1]
+
+# Define the new order of the columns
+new_order <- c("WT.Endo.R1", "WT.Endo.R2", "WT.Endo.R3", "DTU.Endo.R1", "DTU.Endo.R2", "DTU.Endo.R3", 
+               "CS.Endo.R2", "CS.Endo.R3", "CS.Endo.R1", "WT.Rescue.R1", "WT.Rescue.R2", "WT.Rescue.R3", 
+               "DTU.Rescue.R1", "DTU.Rescue.R2", "DTU.Rescue.R3", "CS.Rescue.R1", "CS.Rescue.R2", "CS.Rescue.R3")
+
+# Reorder the columns
+proteome_2D <- proteome_2D[, new_order]
+# Assuming proteome_2D is your new heatmap data
+original_colnames <- colnames(proteome_2D)
+
+# Use the same renaming scheme as in the first heatmap
+new_colnames <- gsub("CS", "DMKN αβ-/-", gsub("DTU", "DMKN βγ-/-", gsub("WT", "WT DMKN αβγ", gsub("_", " ", gsub("Rep", "", gsub("Endogenous", "Endogenous", gsub("Rescue", "Rescue", gsub("NoSerum_", "", original_colnames))))))))
+colnames(proteome_2D) <- new_colnames
+
+# Create an annotation data frame
+annotation_df <- data.frame(
+  Condition = factor(rep(c("WT DMKN αβγ Endogenous", "DMKN βγ-/- Endogenous", "DMKN αβ-/- Endogenous", 
+                           "WT DMKN αβγ Rescue", "DMKN βγ-/- Rescue", "DMKN αβ-/- Rescue"), each = 3))
+)
+rownames(annotation_df) <- colnames(proteome_2D)
+
+# Define colors for the annotation
+annotation_colors = list(
+  Condition = c("WT DMKN αβγ Endogenous" = "blue", "DMKN βγ-/- Endogenous" = "green", 
+                "DMKN αβ-/- Endogenous" = "red", "WT DMKN αβγ Rescue" = "cyan", 
+                "DMKN βγ-/- Rescue" = "magenta", "DMKN αβ-/- Rescue" = "yellow")
+)
+
+# Plot the heatmap
+
+
+# Load the necessary library
+library(ggplot2)
+
+# Create a data frame
+df <- data.frame(
+  Model = c("Dmkn βγ-/-", "Dmkn αβ-/-", "Dmkn αβ-/- Rescue", "Dmkn βγ-/- Rescue"),
+  Decreased = c(194, 514, 368, 668),
+  Increased = c(294, 422, 302, 332)
+)
+
+# Melt the data frame to long format
+df_long <- reshape2::melt(df, id.vars = "Model")
+
+# Create the bar plot
+ggplot(df_long, aes(x = Model, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Model", y = "Number of Proteins", fill = "Change") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Create a data frame
+df <- data.frame(
+  Condition = factor(c("Dmkn αβ-/- vs WT", "Rescue vs Endogenous (Dmkn αβ-/-)", "Dmkn βγ-/- vs WT", "Rescue vs Endogenous (Dmkn βγ-/-)"), 
+                     levels = c("Dmkn αβ-/- vs WT", "Rescue vs Endogenous (Dmkn αβ-/-)", "Dmkn βγ-/- vs WT", "Rescue vs Endogenous (Dmkn βγ-/-)")),  # Specify the order of conditions
+  Decreased = c(-514, -368, -194, -668),  # Make Decreased negative
+  Increased = c(422, 302, 294, 332)
+)
+
+# Add a Total column
+df$Total <- abs(df$Decreased) + df$Increased
+
+# Melt the data frame to long format
+df_long <- reshape2::melt(df, id.vars = c("Condition", "Total"))
+
+# Create the diverging stacked bar plot
+ggplot(df_long, aes(x = Condition, y = value, fill = variable)) +
+  geom_bar(stat = "identity") +
+  geom_text(data = subset(df_long, variable == "Increased"), aes(label = Total, y = 600), vjust = -0.5, hjust = 0.5, color = "black") +  # Display total number at a fixed position
+  scale_y_continuous(labels = abs) +  # Make y-axis labels positive
+  labs(x = "Condition", y = "Number of Significantly Differential Proteins", fill = "Change") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+# Figure 
+
+## log2FC Average
+```{r}
+
+
+renamed_df_test <- renamed_df 
+
+# Rename columns in the second dataframe
+# names(renamed_df_test)[1:3] <- paste0("WT_Endogenous_", 1:3)
+# names(renamed_df_test)[4:6] <- paste0("WT_Treated_", 1:3)
+# names(renamed_df_test)[7:9] <- paste0("DTU_Endogenous_", 1:3)
+# names(renamed_df_test)[10:12] <- paste0("DTU_Treated_", 1:3)
+# names(renamed_df_test)[13:15] <- paste0("CS_Endogenous_", 1:3)
+# names(renamed_df_test)[16:18] <- paste0("CS_Treated_", 1:3)
+# Split the strings by "/"
+
+# Filter rows where 'Description' contains any of the terms
+filtered_GO_terms <- ENDO_CS_UP_cluster_significant_GO@compareClusterResult[grep("adherens junction|cadherin binding", ENDO_CS_UP_cluster_significant_GO@compareClusterResult$Description), ]
+split_geneIDs <- strsplit(filtered_GO_terms$geneID, "/")
+
+# Unlist and extract unique gene IDs
+unique_geneIDs <- unique(unlist(split_geneIDs))
+
+names <- c("CTNND1", "PTPRK", "EGFR", "ERBB2", "PTPN1", "CTNNB1", "CTNNA1", "PLEC", "SCRIB", "TNKS1BP1", "PKP3", "PKP4")
+
+renamed_df_test <- renamed_df_test %>%
+  mutate(across(starts_with(c("CS_", "WT_", "DTU_")), as.numeric))
+
+# Now calculate the row means
+result <- renamed_df_test %>%
+  filter(PG.Genes %in% unique_geneIDs) %>%
+  mutate(
+    CS_Avg_Endogenous = select(., starts_with("CS_Endogenous_")) %>% 
+                                   keep(is.numeric) %>% 
+                                   rowMeans(na.rm = TRUE),
+    WT_Avg_Endogenous = select(., starts_with("WT_Endogenous_")) %>% 
+                                keep(is.numeric) %>% 
+                                rowMeans(na.rm = TRUE),
+    DTU_AVG_Endogenous = select(., starts_with("DTU_Endogenous_")) %>% 
+                             keep(is.numeric) %>% 
+                             rowMeans(na.rm = TRUE),
+    Log2_Ratio_CS_Endogenous = log2(WT_Avg_Endogenous / CS_Avg_Endogenous),
+    Log2_Ratio_DTU_Endogenous = log2(WT_Avg_Endogenous / DTU_AVG_Endogenous),
+    CS_Avg_Rescue = select(., starts_with("CS_Rescue_")) %>% 
+                                keep(is.numeric) %>% 
+                                rowMeans(na.rm = TRUE),
+    DTU_AVG_Rescue = select(., starts_with("CS_Rescue_")) %>% 
+                          keep(is.numeric) %>% 
+                          rowMeans(na.rm = TRUE),
+    WT_Endogenous_Avg_Rescue = select(., matches("WT_Rescue_")) %>% 
+                             keep(is.numeric) %>% 
+                             rowMeans(na.rm = TRUE),
+    Log2_Ratio_CS_Rescue = log2(CS_Avg_Rescue/CS_Avg_Endogenous),
+    Log2_Ratio_DTU_Rescue = log2(DTU_AVG_Rescue/DTU_AVG_Endogenous),
+    Log2_Ratio_WT_Rescue = log2(WT_Endogenous_Avg_Rescue / WT_Avg_Endogenous))  %>%
+  select(PTM_collapse_key, PEP.StrippedSequence, Log2_Ratio_CS_Endogenous, Log2_Ratio_DTU_Endogenous, Log2_Ratio_CS_Rescue, Log2_Ratio_WT_Rescue,  Log2_Ratio_DTU_Rescue)
+
+global_PG_QUANT_test <-global_PG_QUANT
+global_PG_QUANT_test = global_PG_QUANT_V2
+# Define the names map
+names_map_global <- c(
+  "PG.ProteinGroups" = "PG.ProteinGroups",
+  "PG.Genes"="PG.Genes",
+  "X.1..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_1.raw.PG.MS1Quantity" = "WT_Endogenous_1",
+  "X.2..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_2.raw.PG.MS1Quantity" = "WT_Endogenous_2",
+  "X.3..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_3.raw.PG.MS1Quantity" = "WT_Endogenous_3",
+  "X.4..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_4.raw.PG.MS1Quantity" = "WT_Rescue_1",
+  "X.5..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_5.raw.PG.MS1Quantity" = "WT_Rescue_2",
+  "X.6..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_6.raw.PG.MS1Quantity" = "WT_Rescue_3",
+  "X.7..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_13.raw.PG.MS1Quantity" = "DTU_Endogenous_1",
+  "X.8..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_14.raw.PG.MS1Quantity" = "DTU_Endogenous_2",
+  "X.9..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_15.raw.PG.MS1Quantity" = "DTU_Endogenous_3",
+  "X.10..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_16.raw.PG.MS1Quantity" = "DTU_Rescue_1",
+  "X.11..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_17.raw.PG.MS1Quantity" = "DTU_Rescue_2",
+  "X.12..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_18.raw.PG.MS1Quantity" = "DTU_Rescue_3",
+  "X.13..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_25.raw.PG.MS1Quantity" = "CS_Endogenous_1",
+  "X.14..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_26.raw.PG.MS1Quantity" = "CS_Endogenous_2",
+  "X.15..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_27.raw.PG.MS1Quantity" = "CS_Endogenous_3",
+  "X.16..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_28.raw.PG.MS1Quantity" = "CS_Rescue_1",
+  "X.17..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_29.raw.PG.MS1Quantity" = "CS_Rescue_2",
+  "X.18..20221215_MK_EVO_VC_noFAIMS_15cm_WHISPER100_20SPD_global_Ntert_DMKN_KO_30.raw.PG.MS1Quantity" = "CS_Rescue_3"
+)
+
+
+# Rename the columns
+colnames(global_PG_QUANT_test) <- names_map_global[colnames(global_PG_QUANT_test)]
+
+
+# Check if the length of new names matches with the length of current names
+if (length(new_names) == length(current_names)) {
+  # Set the new column names
+  colnames(global_PG_QUANT_test) <- new_names
+} else {
+  print("The lengths of current and new column names do not match.")
+}
+
+global_PG_QUANT_test$CS_Endogenous_1 <- as.numeric(gsub(",", ".", global_PG_QUANT_test$CS_Endogenous_1))
+
+
+global_PG_QUANT_test = global_PG_QUANT_test %>%
+  mutate(across(starts_with(c("CS_", "WT_", "DTU_")), as.numeric))
+global_PG_QUANT_test = na.omit(global_PG_QUANT_test)
+
+# Convert to scientific notation
+global_PG_QUANT_test$CS_Endogenous_1 <- formatC(global_PG_QUANT_test$CS_Endogenous_1, format = "e", digits = 2)
+
+# Update subsequent functions
+result_global <- global_PG_QUANT_test %>% 
+  filter(PG.Genes %in% unique_geneIDs) %>% 
+  mutate( 
+    WT_Control_Avg_Endogenous = select(., matches("WT_Endogenous_\\d+")) %>% keep(is.numeric) %>% rowMeans(na.rm = TRUE),
+    DTU_Avg_Endogenous = select(., matches("DTU_Endogenous_\\d+")) %>% keep(is.numeric) %>% rowMeans(na.rm = TRUE),
+    CS_Avg_Endogenous = select(., matches("CS_Endogenous_\\d+")) %>% keep(is.numeric) %>% rowMeans(na.rm = TRUE),
+    Log2_Ratio_CS_Endogenous = log2(WT_Control_Avg_Endogenous / CS_Avg_Endogenous),
+    Log2_Ratio_DTU_Endogenous = log2(WT_Control_Avg_Endogenous / DTU_Avg_Endogenous),
+    WT_Control_Avg_Rescue = select(., matches("WT_Rescue_\\d+")) %>% keep(is.numeric) %>% rowMeans(na.rm = TRUE),
+    DTU_Avg_Rescue = select(., matches("DTU_Rescue_\\d+")) %>% keep(is.numeric) %>% rowMeans(na.rm = TRUE),
+    CS_Avg_Rescue = select(., matches("CS_Rescue_\\d+")) %>% keep(is.numeric) %>% rowMeans(na.rm = TRUE),
+    Log2_Ratio_CS_Rescue = log2(CS_Avg_Rescue / CS_Avg_Endogenous),
+    Log2_Ratio_DTU_Rescue = log2(DTU_Avg_Rescue / DTU_Avg_Endogenous),
+    Log2_Ratio_WT_Rescue = log2(WT_Control_Avg_Rescue / WT_Control_Avg_Endogenous) 
+  ) %>% 
+  select(PG.ProteinGroups, PG.Genes, Log2_Ratio_CS_Endogenous, Log2_Ratio_DTU_Endogenous, Log2_Ratio_CS_Rescue, Log2_Ratio_DTU_Rescue, Log2_Ratio_WT_Rescue)
+
+
+# Assuming the first dataframe is named result and the second dataframe is result_global
+# Make sure both dataframes have the same number of rows and are in the same order
+# Extract the protein part of PTM_collapse_key
+protein <- stringr::str_extract(result$PTM_collapse_key, "^[^_]*")
+
+# Find the rows in result_global where PG.Genes matches the protein
+matching_rows <- result_global$PG.Genes %in% protein
+
+# Subset result_global using the matching rows
+result_global_matched <- result_global[matching_rows, ]
+
+# Define the matching columns
+matching_cols <- intersect(names(result), names(result_global_matched))
+
+# Initialize an empty data frame for df_diff
+df_diff <- data.frame()
+
+# Iterate over the rows of result
+for (i in 1:nrow(result)) {
+  # Find the matching row in result_global_matched
+  matching_row <- which(result_global_matched$PG.Genes == protein[i])
+  
+  # If there's a match
+  if (length(matching_row) > 0) {
+    # Subtract the global protein value from the phospho-site
+    diff <- (result[i, matching_cols] - (result_global_matched[matching_row, matching_cols]))
+    
+    # Add the PTM_collapse_key to the difference
+    diff <- cbind(result[i, "PTM_collapse_key"], diff)
+    
+    # Bind the difference to df_diff
+    df_diff <- rbind(df_diff, diff)
+  }
+}
+
+# Set the row names of df_diff to the protein names
+rownames(df_diff) <- df_diff$PTM_collapse_key
+
+
+
+# Assuming df_diff is your dataframe
+df_long <- df_diff %>%
+  pivot_longer(cols = -PTM_collapse_key, names_to = "Ratio", values_to = "Value")
+
+non_ctnnd1_keys <- df_diff$PTM_collapse_key[!grepl("^CTNND1|PTPRK|EGFR", df_diff$PTM_collapse_key)]
+
+# keys <- c("CTNND1_S268_M2", "CTNND1_S269_M1",  "CTNND1_S288_M1", "CTNND1_T310_M1", "CTNND1_T906_M1", "CTNND1_T916_M1", "PTPRK_Y858_M1","EGFR_S1039_M1", "EGFR_S991_M1","EGFR_T693_M1",non_ctnnd1_keys)
+
+# Assuming df_diff is your dataframe
+df_long <- df_diff %>% na.omit() %>%
+  filter(str_detect(PTM_collapse_key, "CTNND1")) %>%
+  pivot_longer(cols = -PTM_collapse_key, names_to = "Ratio", values_to = "Value")
+
+# Define the order of the levels
+levels_order <- c("Log2_Ratio_DTU_Endogenous","Log2_Ratio_CS_Endogenous", "Log2_Ratio_CS_Rescue", "Log2_Ratio_DTU_Rescue", "Log2_Ratio_WT_Rescue")
+
+# Convert Ratio to a factor with the specified order of levels
+df_long$Ratio <- factor(df_long$Ratio, levels = levels_order)
+#df_long$PTM_collapse_key <- gsub("_", " ", sub("_M[12]$", "", df_long$PTM_collapse_key))
+# Rename the levels of the Ratio variable
+df_long <- df_long %>%
+  mutate(Ratio = recode(Ratio,
+                        "Log2_Ratio_CS_Endogenous" = "Endogenous WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous DMKN \U03B1\U03B2 -/-",
+                        "Log2_Ratio_DTU_Endogenous" = "Endogenous WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous DMKN \U03B2\U03B3 -/-",
+                        "Log2_Ratio_CS_Rescue" = "Rescue DMKN \U03B1\U03B2 -/- vs\nEndogenous DMKN \U03B1\U03B2 -/-",
+                        "Log2_Ratio_DTU_Rescue" = "Rescue DMKN \U03B2\U03B3 -/- vs\nEndogenous DMKN \U03B2\U03B3 -/-",
+                        "Log2_Ratio_WT_Rescue" = "Rescue WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous WT DMKN \U03B1\U03B2\U03B3"))
+# Create dot plot
+
+df_long <- df_long %>%
+  filter(Ratio != "Rescue WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous WT DMKN \U03B1\U03B2\U03B3")
+
+#df_long$Ratio <- str_wrap(df_long$Ratio, width = 10)
+# Define a vector of colors
+colors <- c("#377eb8", "#ff7f00", "#4daf4a", "#f781bf", "#a65628")
+# Find the middle category
+middle_position <- (length(unique(df_long$Ratio)) + 1) / 2
+
+p <- ggplot(df_long, aes(x = Ratio, y = Value, color = Ratio)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = abs(log2(1.5)), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = -abs(log2(1.5)), linetype = "dashed", color = "red") +
+  facet_wrap(~ PTM_collapse_key, scales = "free_y", nrow = 2) +
+  coord_cartesian(ylim = c(-3, 3)) +
+  theme_bw() +
+  theme(text = element_text(size = 8),  # Set global font size to 6
+        axis.text.x = element_blank(),  # Remove x-axis labels
+        axis.ticks.x = element_blank(),  # Remove x-axis ticks
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom") +  # Move legend to bottom
+  labs(title = "Protein-Normalized p-Sites for Cell-Cell Adhesion Related Proteins", y = "Difference in Log2 Fold Change Coefficients of Phosphorylated Peptide and Protein Abundance", x = NULL) +  # Remove x-axis label
+  scale_color_manual(values = colors)  +# Add this line
+  theme(text = element_text(family = "Arial")) + geom_vline(xintercept = middle_position, linetype = "dashed", color = "black")
+
+p_seperately 
+p_average = p
+```
+
+## log2FC Replicates
+```{r}
+# Calculate the log2 fold change for each replicate individually for each condition
+# Calculate the log2 fold change for each replicate individually for each condition
+result <- renamed_df_test %>%
+  filter(PG.Genes %in% unique_geneIDs) %>%
+  mutate(Log2_Ratio_CS_Endogenous_1 = log2(WT_Endogenous_Rep1 / CS_Endogenous_Rep1),
+         Log2_Ratio_CS_Endogenous_2 = log2(WT_Endogenous_Rep2 / CS_Endogenous_Rep2),
+         Log2_Ratio_CS_Endogenous_3 = log2(WT_Endogenous_Rep3 / CS_Endogenous_Rep3),
+         Log2_Ratio_DTU_Endogenous_1 = log2(WT_Endogenous_Rep1 / DTU_Endogenous_Rep1),
+         Log2_Ratio_DTU_Endogenous_2 = log2(WT_Endogenous_Rep2 / DTU_Endogenous_Rep2),
+         Log2_Ratio_DTU_Endogenous_3 = log2(WT_Endogenous_Rep3 / DTU_Endogenous_Rep3),
+         Log2_Ratio_CS_Rescue_1 = log2(CS_Rescue_Rep1 / CS_Endogenous_Rep1),
+         Log2_Ratio_CS_Rescue_2 = log2(CS_Rescue_Rep2 / CS_Endogenous_Rep2),
+         Log2_Ratio_CS_Rescue_3 = log2(CS_Rescue_Rep3 / CS_Endogenous_Rep3),
+         Log2_Ratio_DTU_Rescue_1 = log2(DTU_Rescue_Rep1 / DTU_Endogenous_Rep1),
+         Log2_Ratio_DTU_Rescue_2 = log2(DTU_Rescue_Rep2 / DTU_Endogenous_Rep2),
+         Log2_Ratio_DTU_Rescue_3 = log2(DTU_Rescue_Rep3 / DTU_Endogenous_Rep3),
+         Log2_Ratio_WT_Rescue_1 = log2(WT_Rescue_Rep1 / WT_Endogenous_Rep1),
+         Log2_Ratio_WT_Rescue_2 = log2(WT_Rescue_Rep2 / WT_Endogenous_Rep2),
+         Log2_Ratio_WT_Rescue_3 = log2(WT_Rescue_Rep3 / WT_Endogenous_Rep3)) %>%
+  select(PTM_collapse_key, PEP.StrippedSequence, starts_with("Log2_Ratio_"))
+
+# Calculate the log2 fold change for each replicate individually for each condition
+result_global <- global_PG_QUANT_test %>%
+  filter(PG.Genes %in% unique_geneIDs) %>%
+  mutate(Log2_Ratio_CS_Endogenous_1 = log2(WT_Endogenous_1 / CS_Endogenous_1),
+         Log2_Ratio_CS_Endogenous_2 = log2(WT_Endogenous_2 / CS_Endogenous_2),
+         Log2_Ratio_CS_Endogenous_3 = log2(WT_Endogenous_3 / CS_Endogenous_3),
+         Log2_Ratio_DTU_Endogenous_1 = log2(WT_Endogenous_1 / DTU_Endogenous_1),
+         Log2_Ratio_DTU_Endogenous_2 = log2(WT_Endogenous_2 / DTU_Endogenous_2),
+         Log2_Ratio_DTU_Endogenous_3 = log2(WT_Endogenous_3 / DTU_Endogenous_3),
+         Log2_Ratio_CS_Rescue_1 = log2(CS_Rescue_1 / CS_Endogenous_1),
+         Log2_Ratio_CS_Rescue_2 = log2(CS_Rescue_2 / CS_Endogenous_2),
+         Log2_Ratio_CS_Rescue_3 = log2(CS_Rescue_3 / CS_Endogenous_3),
+         Log2_Ratio_DTU_Rescue_1 = log2(DTU_Rescue_1 / DTU_Endogenous_1),
+         Log2_Ratio_DTU_Rescue_2 = log2(DTU_Rescue_2 / DTU_Endogenous_2),
+         Log2_Ratio_DTU_Rescue_3 = log2(DTU_Rescue_3 / DTU_Endogenous_3),
+         Log2_Ratio_WT_Rescue_1 = log2(WT_Rescue_1 / WT_Endogenous_1),
+         Log2_Ratio_WT_Rescue_2 = log2(WT_Rescue_2 / WT_Endogenous_2),
+         Log2_Ratio_WT_Rescue_3 = log2(WT_Rescue_3 / WT_Endogenous_3)) %>%
+  select(PG.ProteinGroups, PG.Genes, starts_with("Log2_Ratio_"))
+
+
+
+# Assuming the first dataframe is named result and the second dataframe is result_global
+# Make sure both dataframes have the same number of rows and are in the same order
+# Extract the protein part of PTM_collapse_key
+protein <- stringr::str_extract(result$PTM_collapse_key, "^[^_]*")
+
+# Find the rows in result_global where PG.Genes matches the protein
+matching_rows <- result_global$PG.Genes %in% protein
+
+# Subset result_global using the matching rows
+result_global_matched <- result_global[matching_rows, ]
+
+# Define the matching columns
+matching_cols <- intersect(names(result), names(result_global_matched))
+
+# Initialize an empty data frame for df_diff
+df_diff <- data.frame()
+
+# Iterate over the rows of result
+for (i in 1:nrow(result)) {
+  # Find the matching row in result_global_matched
+  matching_row <- which(result_global_matched$PG.Genes == protein[i])
+  
+  # If there's a match
+  if (length(matching_row) > 0) {
+    # Subtract the global protein value from the phospho-site
+    diff <- result[i, matching_cols] - (result_global_matched[matching_row, matching_cols])
+    
+    # Add the PTM_collapse_key to the difference
+    diff <- cbind(result[i, "PTM_collapse_key"], diff)
+    
+    # Bind the difference to df_diff
+    df_diff <- rbind(df_diff, diff)
+  }
+}
+
+# Set the row names of df_diff to the protein names
+rownames(df_diff) <- df_diff$PTM_collapse_key
+
+
+# Assuming df_diff is your dataframe
+df_long <- df_diff %>%
+  pivot_longer(cols = -PTM_collapse_key, names_to = "Ratio", values_to = "Value")
+
+keys <- df_diff$PTM_collapse_key[grepl("^ADD1|ANXA2|BAIAP2|CTNNA1|CTNND1|MYH9|PARD3|PKP3|PTPRK|SCRIB|TJP1", df_diff$PTM_collapse_key)]
+
+#keys <- c("CTNND1_S268_M2", "CTNND1_S269_M1",  "CTNND1_S288_M1", "CTNND1_T310_M1", "CTNND1_T906_M1", "CTNND1_T916_M1", "PTPRK_Y858_M1","EGFR_S1039_M1", "EGFR_S991_M1","EGFR_T693_M1",non_ctnnd1_keys)
+
+# Assuming df_diff is your dataframe
+df_long <- df_diff %>% na.omit() %>%
+  #filter(str_detect(PTM_collapse_key, "CTNND1|CTNNA1|CTNNB1|PTPRK|EGFR|SRC")) %>%
+  pivot_longer(cols = -PTM_collapse_key, names_to = "Ratio", values_to = "Value")
+# 
+# # Define the order of the levels
+# levels_order <- c("Log2_Ratio_DTU_Endogenous","Log2_Ratio_CS_Endogenous", "Log2_Ratio_CS_Rescue", "Log2_Ratio_DTU_Rescue", "Log2_Ratio_WT_Rescue")
+# 
+# # Convert Ratio to a factor with the specified order of levels
+# df_long$Ratio <- factor(df_long$Ratio, levels = levels_order)
+# #df_long$PTM_collapse_key <- gsub("_", " ", sub("_M[12]$", "", df_long$PTM_collapse_key))
+# # Rename the levels of the Ratio variable
+# df_long <- df_long %>%
+#   mutate(Ratio = recode(Ratio,
+#                         "Log2_Ratio_CS_Endogenous" = "Endogenous WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous DMKN \U03B1\U03B2 -/-",
+#                         "Log2_Ratio_DTU_Endogenous" = "Endogenous WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous DMKN \U03B2\U03B3 -/-",
+#                         "Log2_Ratio_CS_Rescue" = "Rescue DMKN \U03B1\U03B2 -/- vs\nEndogenous DMKN \U03B1\U03B2 -/-",
+#                         "Log2_Ratio_DTU_Rescue" = "Rescue DMKN \U03B2\U03B3 -/- vs\nEndogenous DMKN \U03B2\U03B3 -/-",
+#                         "Log2_Ratio_WT_Rescue" = "Rescue WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous WT DMKN \U03B1\U03B2\U03B3"))
+# # Create dot plot
+# 
+# df_long <- df_long %>%
+#   filter(Ratio != "Rescue WT DMKN \U03B1\U03B2\U03B3 vs\nEndogenous WT DMKN \U03B1\U03B2\U03B3")
+
+# Split the Var2 variable into two parts
+df_long <- df_long %>%
+  tidyr::separate(Ratio, into = c("Term1", "Term2", "Genotype", "Treatment"), sep = "_")
+
+# Replace the values in the Genotype and Treatment columns
+df_long$Genotype[df_long$Genotype == "WT"] <- "WT"
+df_long$Genotype[df_long$Genotype == "DTU"] <- "WT DMKN \U03B1\U03B2\U03B3 vs\n DMKN \U03B2\U03B3 -/-"
+df_long$Genotype[df_long$Genotype == "CS"] <- "WT DMKN \U03B1\U03B2\U03B3 vs\n DMKN \U03B1\U03B2 -/-"
+
+df_long$Treatment[df_long$Treatment == "Control"] <- "Endogenous"
+df_long$Treatment[df_long$Treatment == "Treated"] <- "Rescue"
+
+df_long <- df_long %>%
+  filter(Genotype  != "WT")
+
+
+# Convert Genotype to a factor with a specific order of levels
+df_long$Genotype <- factor(df_long$Genotype)
+#df_long <- df_long %>% rename("Fold Change" = Genotype)
+
+df_long$Treatment <- as.factor(df_long$Treatment)
+#df_long$Ratio <- str_wrap(df_long$Ratio, width = 10)
+# Define a vector of colors
+colors <- c("#377eb8", "#ff7f00", "#4daf4a", "#f781bf", "#a65628")
+# Find the middle category
+middle_position <- (length(unique(df_long$Treatment)) + 1) / 2
+
+p <- ggplot(df_long, aes(x = Ratio, y = Value, color = Ratio)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = abs(log2(1.5)), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = -abs(log2(1.5)), linetype = "dashed", color = "red") +
+  facet_wrap(~ PTM_collapse_key, scales = "free_y", nrow = 2) +
+  #coord_cartesian(ylim = c(-3, 3)) +
+  theme_bw() +
+  theme(text = element_text(size = 8),  # Set global font size to 6
+        axis.text.x = element_blank(),  # Remove x-axis labels
+        axis.ticks.x = element_blank(),  # Remove x-axis ticks
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom") +  # Move legend to bottom
+  labs(title = "Protein-Normalized p-Sites for Cell-Cell Adhesion Related Proteins", y = "Difference in Log2 Fold Change Coefficients of Phosphorylated Peptide and Protein Abundance", x = NULL) +  # Remove x-axis label
+ # scale_color_manual(values = colors)  +# Add this line
+  theme(text = element_text(family = "Arial")) + geom_vline(xintercept = middle_position, linetype = "dashed", color = "black")
+
+p_violin = ggplot(df_long, aes(x = Treatment, y = Value, fill = Genotype)) +
+    geom_violin(width = 0.7, alpha = 0.9, color = "black") +
+    ggforce::geom_sina() +
+    facet_wrap(~ PTM_collapse_key) +
+    stat_compare_means(aes(group = Treatment), method = "aov", label.y = 3.5, size = 3) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          axis.text.y = element_text(size = 8),
+          strip.text = element_text(size = 8, face = "bold"),
+          legend.title = element_text(size = 8, face = "bold"),
+          legend.text = element_text(size = 8),
+          legend.position = "bottom") +
+    labs(x = "Treatments", y = "Difference in Log2 Fold Change Coefficients of Phosphorylated Peptide and Protein Abundance", fill = "Genotype")
+
+#### Only significant genes from adherens junction and cadherin binding
+
+# Perform pairwise t-tests for each Genotype and Kinase
+kruskal_results <- df_long %>%
+  group_by(PTM_collapse_key) %>%
+  do({
+    data.frame(p_value = kruskal.test(.$Value ~ .$Genotype)$p.value)
+  })
+
+# Perform ANOVA for each Treatment and Kinase
+anova_results <- df_long %>%
+  group_by(PTM_collapse_key) %>%
+  do({
+    data.frame(p_value = summary(aov(.$Value ~ .$Treatment))[[1]]["Pr(>F)"][1,])
+  })
+two_way_anova_results <- df_long %>%
+  group_by(PTM_collapse_key) %>%
+  do({
+    data.frame(p_value = summary(aov(.$Value ~ .$Genotype * .$Treatment))[[1]]["Pr(>F)"][1,])
+  })
+# Perform pairwise t-test for each Treatment and Kinase
+ttest_results <- df_long %>%
+  group_by(PTM_collapse_key) %>%
+  do({
+    p_matrix <- pairwise.t.test(.$Value, .$Genotype, p.adjust.method = "BH")$p.value
+    data.frame(Genotype1 = rownames(p_matrix), Genotype2 = colnames(p_matrix), p_value = as.vector(p_matrix))
+  })
+
+# Filter the kinases where the p-value is significant in either test
+significant_PhosSites_anova <- anova_results %>% 
+  filter(p_value < 0.05) %>% 
+  .$PTM_collapse_key %>% 
+  unique()
+# Get significant PhosSites from t-test
+significant_PhosSites_ttest <- ttest_results %>% 
+  filter(p_value < 0.05) %>% 
+  .$PTM_collapse_key %>% 
+  unique()
+significant_PhosSites <- union(significant_PhosSites_ttest, significant_PhosSites_anova)
+
+
+# Filter the df_long to include only the significant kinases
+df_long <- df_long %>%
+  filter(PTM_collapse_key %in% significant_PhosSites_anova)
+df_long$PTM_collapse_key <- gsub("_", " ", sub("_M[12]$", "", df_long$PTM_collapse_key))
+
+df_long_unique <- df_long %>%
+  filter(str_detect(PTM_collapse_key, ("ADD1 S358|ANXA2 S12|BAIAP2 S454|CTNNA1 S655|CTNND1 S268|CTNND1 S288|CTNND1 S320|MYH9 S1943|PARD3 S144|PKP3 S285|SCRIB S1378|TJP1 S168")))
+# df_long_unique <- df_long %>%
+#   filter(str_detect(PTM_collapse_key, ("ADD1 S358|ANXA2 S12|BAIAP2 S454|CTNNA1 S655|CTNND1 S268|CTNND1 S288|CTNND1 S320|MYH9 S1943|PARD3 S144|PKP3 S285|PTPRK S856|SCRIB S1378|TJP1 S168")))
+colors <- c("#377eb8", "#ff7f00", "#4daf4a", "#f781bf", "#a65628")
+middle_position <- (length(unique(df_long_unique$Treatment)) + 1) / 2
+
+p_violin_raw = ggplot(df_long_unique, aes(x = Treatment, y = Value, fill = interaction(Genotype, Treatment))) +
+    geom_violin(width = 0.7, alpha = 0.9, color = "black", size =0.2)+
+    ggforce::geom_sina(size = 0.1)+
+    facet_wrap(~ PTM_collapse_key,scales = "free_y", nrow = 2) +
+    #stat_compare_means(aes(group = Genotype), method = "t.test", label.y = 1.8, size = 2, label = "p.signif", hide.ns = T) +
+    stat_compare_means(aes(group = Treatment), method = "aov", label.y = 1.5, size = 2,) +
+    theme_bw() +
+    coord_cartesian(ylim = c(-3, 3)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
+          axis.text.y = element_text(size = 6),
+          strip.text = element_text(size = 6, face = "bold"),
+          legend.title = element_text(size = 6, face = "bold"),
+          legend.text = element_text(size = 6),
+          legend.position = "bottom",text = element_text(size = 8)) +
+    labs(x = "Treatments", y = "Difference in Log2 Fold Change Coefficients of Phosphorylated Peptide and Protein Abundance", fill = "Genotype",
+         title = "Violin Plot with ANOVA Test Results (p < 0.01)") +
+    scale_fill_manual(values = colors)  # Add this line
+
+p_violin = ggplot(df_long_unique, aes(x = Treatment, y = Value, fill = interaction(Genotype, Treatment))) +
+    facet_wrap(~ PTM_collapse_key, scales = "free_y", nrow = 2) +
+    stat_compare_means(aes(group = Treatment), method = "aov", label.y = 2.8, size = 2.5,) +
+    #geom_hline(yintercept = c(log2(1.5), -log2(1.5)), linetype = "dashed", color = "red") +  # Add dashed lines at abs(log2(1.5))
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +  # Add dashed line at 0 in black color
+    geom_vline(xintercept = middle_position, linetype = "dashed", color = "black")  +# Add vertical dashed line at middle_position 
+    geom_violin(width = 1, alpha = 2, color = "black", size =0.2,adjust=2,draw_split=TRUE)+
+    ggforce::geom_sina(size = 0.8)+ coord_cartesian(ylim = c(-5, 3)) +
+    theme_bw() +
+    theme(axis.text.x = element_blank(),  # Remove x-axis labels
+          axis.ticks.x = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),, # Remove y-axis ticks
+          axis.text.y = element_text(size = 6),
+          strip.text = element_text(size = 6, face = "bold"),
+          legend.title = element_text(size = 6, face = "bold"),
+          legend.text = element_text(size = 6),
+          legend.position = "bottom",
+          text = element_text(size = 6, family = "Arial"))  +  # Remove minor y grid lines
+    labs(y = "Difference in Log2 Fold Change Coefficients of Phosphorylated Peptide and Protein Abundance", fill = "Genotype-Treatment") +
+    scale_fill_manual(values = colors)   # Use defined colors
+    
+
+```
+# Import data
+```{r cars}
+
+Proteome_protein_quant <- read_delim("20240730_143924_20220201_VC_3D_PROTEOME_BG_AB_WT_v2_Report.tsv", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+
+# Define the new names
+new_names_cells <- c("[1] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_1_1.raw.PG.MS1Quantity" = "DMKN_BG_KO_1",
+               "[2] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_2_1.raw.PG.MS1Quantity" = "DMKN_BG_KO_2",
+               "[3] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_3_1.raw.PG.MS1Quantity" = "DMKN_BG_KO_3",
+               "[4] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_1_1.raw.PG.MS1Quantity" = "DMKN_AB_KO_1",
+               "[5] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_2_1.raw.PG.MS1Quantity" = "DMKN_AB_KO_2",
+               "[6] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_3_1.raw.PG.MS1Quantity" = "DMKN_AB_KO_3",
+               "[7] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_1_1.raw.PG.MS1Quantity" = "WT_1",
+               "[8] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_2_1.raw.PG.MS1Quantity" = "WT_2",
+               "[9] 20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_3_1.raw.PG.MS1Quantity" = "WT_3"
+               )
+
+# Convert the MS1 columns into numeric format
+MS1_columns_cells <- grep("raw", names(Proteome_protein_quant), value = TRUE)
+Proteome_protein_quant[MS1_columns_cells] <- lapply(Proteome_protein_quant[MS1_columns_cells], function(x) as.numeric(gsub(",", ".", x)))
+#Cells_protein_quant = Cells_protein_quant %>%
+#  mutate(across(ends_with("Quantity"), log10))
+
+# Rename the columns
+# Get the current column names
+current_names <- colnames(Proteome_protein_quant)
+for (i in seq_along(current_names)) {
+  if (current_names[i] %in% names(new_names_cells)) {
+    colnames(Proteome_protein_quant)[i] <- new_names_cells[current_names[i]]
+  }
+}
+```
+# Volcano Plot
+```{r}
+Proteome_protein_quant <- Proteome_protein_quant[complete.cases(Proteome_protein_quant[, grep("WT", colnames(Proteome_protein_quant))]), ]
+
+# Convert the data to a DGEList for use with edgeR/limma
+df <- Proteome_protein_quant
+df <- df[complete.cases(df[, grep("WT", colnames(df))]), ]
+
+df <- as.data.frame(df)
+df <- df[!is.na(df$PG.ProteinGroups), ]
+
+
+names(df) <- gsub(" ", ".", names(df))
+names(df) <- gsub("/", ".", names(df))
+df = na.omit(df)
+
+#df$unique_genes <- make.names(df$PG.Genes, unique = TRUE)
+#rownames(df) <- df$unique_genes
+
+counts <- df[, -(1:3)]
+rownames(counts) <- make.unique(df$PG.Genes)
+#counts = log2(counts)
+dge <- DGEList(counts = counts)
+
+# Normalize the data
+dge <- calcNormFactors(dge)
+
+# Design matrix
+#group <- factor(gsub(\\s\\d+$, "", colnames(dge))) This is if I dont change the names 
+
+group <- factor(gsub("(\\.KO)?\\_\\d+$", "", colnames(dge))) # THis is if I change the naming above
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+v <- voom(dge, design, plot=FALSE)
+
+contrasts <- makeContrasts(
+  BG_vs_WT = DMKN_BG_KO - WT,
+  AB_vs_WT = DMKN_AB_KO - WT,
+  levels = design
+)
+# Fit the model and perform the tests
+fit <- lmFit(v, design)
+fit2  = contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Extract the p-values and log fold changes (contrasts) from your fit2 object
+p_values <- fit2$p.value
+logFC <- fit2$coefficients
+# 
+# # Create a data frame to hold the p-values and log fold changes
+# df_plot <- data.frame(Contrast = colnames(logFC),
+#                  Gene = rownames(logFC),
+#                  logFC = as.vector(logFC),
+#                  p_value = as.vector(p_values))
+
+# Calculate -log10 of the p-values for the y-axis
+#df_plot$logp <- -log10(df_plot$p_value)
+
+# Create a list to hold the plots
+volcano_plots <- list()
+
+# Define thresholds
+pvalue_threshold <- -log10(0.05)
+logFC_threshold <- log2(1.5)
+
+
+# Convert the row names into a column
+df_plot <- data.frame(Gene = rownames(logFC), logFC = as.vector(logFC), p_value = as.vector(p_values))
+
+# Make sure the contrasts are properly assigned to each row
+df_plot$Contrast <- rep(colnames(logFC), each = nrow(logFC))
+
+
+# Convert matrices to long format data frames
+df_logFC <- as.data.frame(as.table(logFC))
+df_p_values <- as.data.frame(as.table(p_values))
+
+# Rename columns for clarity
+colnames(df_logFC) <- c("Gene", "Contrast", "logFC")
+colnames(df_p_values) <- c("Gene", "Contrast", "p_value")
+
+
+# Merge the two data frames by Gene and Contrast
+df_plot <- merge(df_logFC, df_p_values, by = c("Gene", "Contrast"))
+
+
+# Calculate -log10 of the p-values for the y-axis
+df_plot$logp <- -log10(df_plot$p_value)
+genes_to_highlight <- c("DMKN", "DSG1", "FLG2", "KRT10", "KRT14","ASPRV1", "KLK6","KLK7", "EGFR", "ITGA6","KRTDAP", "SBSN", "BLMH", "CDH1", "DSC1", "CTNND1", "CTNNB1")
+
+for (contrast in unique(df_plot$Contrast)) {
+    # Subset the data for the current contrast
+    df_sub <- df_plot[df_plot$Contrast == contrast, ]
+    
+    # Create a new column for color based on logFC
+    df_sub$color <- ifelse(df_sub$logp > pvalue_threshold & df_sub$logFC > logFC_threshold, "red", ifelse(df_sub$logp > pvalue_threshold & df_sub$logFC < -logFC_threshold, "blue", "grey"))
+    
+    # Create the volcano plot
+    Volcano_p <- ggplot(df_sub, aes(x = logFC, y = logp, color = color)) +
+        geom_point(alpha = 0.4, size = 1.75) +
+        geom_hline(yintercept = pvalue_threshold, linetype = "dashed") +
+        geom_vline(xintercept = c(-logFC_threshold, logFC_threshold), linetype = "dashed") +
+        theme_minimal() +
+        scale_color_identity() + 
+        geom_label_repel(data = subset(df_sub, Gene %in% genes_to_highlight), aes(label = Gene), size = 3, color = "black",label.size = NA, fill = NA, segment.color = "black",segment.size = 0.5,box.padding = 1.5, fontface = "bold", nudge_x = c(-3,3)) +
+        ggtitle(paste("Volcano plot for", contrast)) +
+        xlab("Log2 fold change") +
+        ylab("-Log10 p-value") +
+        coord_cartesian(xlim = c(min(df_plot$logFC), max(df_plot$logFC)), ylim = c(0, max(df_plot$logp)))
+    
+    # Add the plot to the list
+    volcano_plots[[contrast]] <- Volcano_p
+}
+
+
+```
+# Extract sig Hits from LIMMA
+```{r}
+# Define the thresholds
+pvalue_threshold <- -log10(0.05) # Adjust the p-value threshold as needed
+logFC_threshold <- 0.58 # Adjust the log fold change threshold as needed
+
+# Initialize lists to store the top candidates
+top_sig_increase <- list()
+top_sig_decrease <- list()
+
+for (contrast in unique(df_plot$Contrast)) {
+  # Subset the data for the current contrast
+  df_sub <- df_plot[df_plot$Contrast == contrast, ]
+  
+  # Sort by logp value in descending order to get the most significant genes on top
+  df_sub <- df_sub[order(-df_sub$logp),]
+  
+  # Extract top 20 genes with significant increase
+  top_sig_increase[[contrast]] <- head(df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC > logFC_threshold], 20)
+  
+  # Extract top 20 genes with significant decrease
+  top_sig_decrease[[contrast]] <- head(df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC < -logFC_threshold], 20)
+}
+
+# Now you have two lists: top_sig_increase and top_sig_decrease
+# containing the top 20 candidates for each contrast
+
+
+sig_increase <- list()
+A <- list()
+
+# Loop through each contrast
+for (contrast in unique(df_plot$Contrast)) {
+    # Subset the data for the current contrast
+    df_sub <- df_plot[df_plot$Contrast == contrast, ]
+    
+    # Extract genes with significant increase and decrease
+    sig_increase[[contrast]] <- df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC > logFC_threshold]
+    sig_decrease[[contrast]] <- df_sub$Gene[df_sub$logp > pvalue_threshold & df_sub$logFC < -logFC_threshold]
+}
+
+
+sig_increase <- lapply(sig_increase, as.character)
+
+# Map gene symbols to Entrez IDs
+sig_increase_entrez <- lapply(sig_increase, function(genes) {
+  suppressWarnings(
+    mapIds(org.Hs.eg.db,
+           keys = genes,
+           column = "ENTREZID",
+           keytype = "SYMBOL",
+           multiVals = "first")
+  )
+})
+
+
+sig_decrease <- lapply(sig_decrease, as.character)
+
+# Map gene symbols to Entrez IDs
+sig_decrease_entrez <- lapply(sig_decrease, function(genes) {
+  suppressWarnings(
+    mapIds(org.Hs.eg.db,
+           keys = genes,
+           column = "ENTREZID",
+           keytype = "SYMBOL",
+           multiVals = "first")
+  )
+})
+# Transform each character vector in the list and collapse into a comma-separated string
+sig_increase_entrez_transformed <- lapply(sig_increase_entrez, function(x) {
+  x <- gsub(",", " ", x)  # Replace commas with spaces
+  x <- gsub(";", " ", x)  # Replace semicolons with spaces
+  paste(x, collapse = ", ")  # Collapse the vector into a comma-separated string
+})
+# Convert the list to a data frame with 'Name' and 'Genes' columns
+df_sig_increase <- data.frame(Name = names(sig_increase_entrez_transformed), 
+                 Genes = sig_increase_entrez_transformed, 
+                 stringsAsFactors = F)
+
+# Write the DataFrame to a text file
+
+
+
+# Transform each character vector in the list and collapse into a comma-separated string
+sig_decrease_entrez_transformed <- lapply(sig_decrease_entrez, function(x) {
+  x <- gsub(",", " ", x)  # Replace commas with spaces
+  x <- gsub(";", " ", x)  # Replace semicolons with spaces
+  paste(x, collapse = ", ")  # Collapse the vector into a comma-separated string
+})
+
+# Convert the list to a data frame with 'Name' and 'Genes' columns
+df_sig_decrease <- data.frame(Name = names(sig_decrease_entrez_transformed), 
+                 Genes = sig_decrease_entrez_transformed, 
+                 stringsAsFactors = FALSE)
+
+
+#Convert to excel
+output_for_GO_increased = t(do.call(rbind, sig_increase))
+output_for_GO_decreased = t(do.call(rbind, sig_decrease))
+
+```
+
+
+# Heatmap
+```{r}
+# Convert the data to a DGEList for use with edgeR/limma
+df_V2 <- Proteome_protein_quant
+df_V2 <- df_V2[complete.cases(df_V2[, grep("WT", colnames(df_V2))]), ]
+
+df_V2 <- as.data.frame(df_V2)
+df_V2 <- df_V2[!is.na(df_V2$PG.Genes), ]
+names(df_V2) <- gsub(" ", ".", names(df_V2))
+names(df_V2) <- gsub("/", ".", names(df_V2))
+df_V2 = na.omit(df_V2)
+#df_V2$unique_genes <- make.names(df_V2$PG.Genes, unique = TRUE)
+#rownames(df_V2) <- df_V2$unique_genes
+
+counts <- df_V2[, -(1:3)]
+rownames(counts) <- make.unique(df_V2$PG.Genes)
+#counts = log2(counts)
+dge_v2 <- DGEList(counts = counts)
+
+# Normalize the data
+dge_v2 <- calcNormFactors(dge_v2)
+
+# Design matrix
+#group <- factor(gsub(\\s\\d+$, "", colnames(dge))) This is if I dont change the names 
+# Define your factor
+group_v2 <- factor(gsub("(\\.KO)?\\_\\d+$", "", colnames(dge_v2))) # This is if you change the naming above
+
+# Create the design matrix
+design_v2 <- model.matrix(~0 + group_v2)
+colnames(design_v2) <- levels(group_v2)
+
+# Estimate dispersion
+dge_v2 <- estimateDisp(dge_v2, design_v2)
+v_v2 <- voom(dge_v2, design_v2, plot=FALSE)
+
+# Define contrasts
+contrasts_v2 <- makeContrasts(
+  BG_vs_WT = DMKN_BG_KO - WT,
+  AB_vs_WT = DMKN_AB_KO - WT,
+  levels = design
+)
+
+# Fit the model and perform the tests
+fit_v2 <- lmFit(v_v2, design_v2)
+fit2_v2  = contrasts.fit(fit_v2, contrasts_v2)
+fit2_v2 <- eBayes(fit2_v2)
+
+# Extract the p-values and log fold changes (contrasts) from your fit2 object
+p_values_v2 <- fit2_v2$p.value
+logFC_v2 <- fit2_v2$coefficients
+
+# Get the top genes for each contrast
+top_genes_v2 <- topTable(fit2_v2, adjust="BH")
+
+
+# Create a Venn diagram showing numbers of genes significant in each comparison
+#vennDiagram(results)
+
+# Find the top 30 genes which vary between the three  targets in any way
+#top_30_genes <- topTable(fit2_v2, number=30)
+
+
+# Convert t-statistics to z-scores
+
+significant_genes <- which(fit2_v2$F.p.value < 0.05)
+fit2_significant <- fit2_v2[significant_genes, ]
+z_scores <- zscoreT(fit2_significant$t, df=fit2_significant$df.residual)
+
+# Get the gene names from z_scores
+z_score_genes <- rownames(z_scores)
+
+Proteome_protein_quant_V2_filtered <- Proteome_protein_quant[Proteome_protein_quant$PG.Genes %in% z_score_genes, ]
+Proteome_protein_quant_V2_filtered = as.data.frame(Proteome_protein_quant_V2_filtered)
+rownames(Proteome_protein_quant_V2_filtered) = Proteome_protein_quant_V2_filtered$PG.Genes
+Proteome_protein_quant_V2_filtered = Proteome_protein_quant_V2_filtered[4:12]
+original_colnames <- colnames(Proteome_protein_quant_V2_filtered)
+Proteome_protein_quant_V2_filtered_zscore <-t(apply(Proteome_protein_quant_V2_filtered,1,scale))
+colnames(Proteome_protein_quant_V2_filtered_zscore) <- original_colnames
+
+
+annotation_colors = list(
+  Condition = c("WT" = "blue", 
+                "DMKN BG KO" = "green", 
+                "DMKN AB KO" = "red"))
+annotation_df <- data.frame(
+  Condition = factor(rep(c("WT", "DMKN BG KO", "DMKN AB KO"), each = 3))
+)
+rownames(annotation_df) <- colnames(Proteome_protein_quant_V2_filtered_zscore)
+
+
+
+
+#Extract cluster
+heatmap_obj <- pheatmap(Proteome_protein_quant_V2_filtered_zscore, 
+                        cluster_rows = TRUE, 
+                        cluster_cols = FALSE, 
+                        show_rownames = FALSE,
+                        show_colnames = FALSE, 
+                        legend = TRUE, 
+                        legend_breaks = c(max(Proteome_protein_quant_V2_filtered_zscore), -2, -1, 0, 1, 2, 3),
+                        legend_labels = c("Z-Score", "-2", "-1", "0", "1", "2", "3"),
+                        clustering_method = "ward.D2",
+                        angle_col = 45, 
+                        fontsize = 10,
+                        show_col_dendrogram = FALSE,
+                        show_row_dendrogram = FALSE,
+                        annotation_col = annotation_df,
+                        annotation_colors = annotation_colors)
+
+# Extract row clusters
+row_clusters <- cutree(heatmap_obj$tree_row, k = 6)  # Replace 'number_of_clusters' with the actual number
+
+# Create a list to store data frames for each cluster
+cluster_tables <- list()
+
+# Loop through each cluster and create a table
+for (i in unique(row_clusters)) {
+  cluster_tables[[paste0("Cluster_", i)]] <- Proteome_protein_quant_V2_filtered_zscore[row_clusters == i, ]
+}
+
+# Define the order of clusters based on your column names
+ordered_cluster_names <- paste0("Cluster_", seq_len(max(row_clusters)))
+
+# Define the order within each cluster
+column_order <- c("WT_1", "WT_2", "WT_3", "DMKN_BG_KO_1", "DMKN_BG_KO_2", "DMKN_BG_KO_3", "DMKN_AB_KO_1", "DMKN_AB_KO_2", "DMKN_AB_KO_3")
+
+# Print each cluster table in the specified order
+for (cluster_name in ordered_cluster_names) {
+  cat("\n", cluster_name, "\n")
+  cluster_data <- cluster_tables[[paste0("Cluster_", which(ordered_cluster_names == cluster_name))]]
+  ordered_data <- cluster_data[, column_order[column_order %in% colnames(cluster_data)]]
+  print(ordered_data)
+  pheatmap(ordered_data, cluster_cols = F)
+}
+
+library(openxlsx)
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Add a worksheet
+addWorksheet(wb, "Cluster Row Names")
+
+# Initialize a list to store row names
+row_names_list <- list()
+
+# Loop through each cluster and collect row names
+for (i in seq_along(ordered_cluster_names)) {
+  cluster_name <- ordered_cluster_names[i]
+  cluster_data <- cluster_tables[[paste0("Cluster_", which(ordered_cluster_names == cluster_name))]]
+  row_names <- rownames(cluster_data)
+  
+  # Store row names in the list
+  row_names_list[[paste0("Cluster ", i)]] <- row_names
+}
+
+# Find the maximum number of rows
+max_rows <- max(sapply(row_names_list, length))
+
+# Write row names to the worksheet
+for (i in seq_along(row_names_list)) {
+  col_name <- names(row_names_list)[i]
+  writeData(wb, "Cluster Row Names", col_name, startCol = i, startRow = 1)
+  writeData(wb, "Cluster Row Names", row_names_list[[i]], startCol = i, startRow = 2)
+}
+
+# Save the workbook
+
+```
+
+CoRRPLOT
+###CorrPlot
+Quality control 1. Corrplot phos 2. Corrplot proteome
+```{r}
+
+# Read the data
+sampleCorrMatrix_global_SN_3D <- read.delim2("sampleCorrelationMatrix_3DProteome.tsv")
+
+# Define the names map
+names_map_global <- c(
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_1_1.raw" = "WT_Rep1",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_2_1.raw" = "WT_Rep2",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_WT_3_1.raw" = "WT_Rep3",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_1_1.raw" = "DTU_Rep1",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_2_1.raw" = "DTU_Rep2",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_B11_3_1.raw" = "DTU_Rep3",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_1_1.raw" = "CS_Rep1",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_2_1.raw" = "CS_Rep2",
+  "X20220201_MK_Evo_FAIMS_VC_3CV_DIA_global_D2_3_1.raw" = "CS_Rep3"
+)
+
+# Rename the columns
+colnames(sampleCorrMatrix_global_SN_3D) <- names_map_global[colnames(sampleCorrMatrix_global_SN_3D)]
+sampleCorrMatrix_global_SN_3D <- sampleCorrMatrix_global_SN_3D[,-1]
+
+# Convert the character matrix to a numeric matrix
+sampleCorrMatrix_global_SN_numeric <- apply(sampleCorrMatrix_global_SN_3D, 2, as.numeric)
+
+# Check the structure of the new matrix
+str(sampleCorrMatrix_global_SN_numeric)
+
+# If it's now a numeric matrix, you can plot it with corrplot
+if (is.numeric(sampleCorrMatrix_global_SN_numeric)) {
+  corrplot(sampleCorrMatrix_global_SN_numeric, method = "color")
+}
+
+col <- colorRampPalette(c(rgb(0,0,1, alpha=0.5), rgb(1,0,0, alpha=0.5)))(200)
+rownames(sampleCorrMatrix_global_SN_numeric) <- colnames(sampleCorrMatrix_global_SN_numeric)
+smooth_colors <- colorRampPalette(c("lightcoral", "white", "red"))(200)
+
+```
+
+
