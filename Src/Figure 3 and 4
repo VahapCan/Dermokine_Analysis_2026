@@ -296,7 +296,6 @@ filtered_data <- reshaped_data %>%
 significant_results <- significant_results %>%
   mutate(p_value = formatC(p_value, format = "f", digits = 3))
 
-cairo_pdf("O:/MBT-g-Cell-Signaling-Architecture/People Folders/Canbay Vahap/Dermokine_Paper/Supplementary/ksActivityScore_sig_v5.pdf", width = 3.5, height = 8.5, family = "arial")
 ksActivityScore <- ggplot(filtered_data, aes(x = Genotype, y = Activity, fill = Treatment)) +
   geom_violin(width = 0.7, alpha = 0.9, color = "black", size = 0.2) +
   ggforce::geom_sina(size = 0.1) +
@@ -341,12 +340,7 @@ Signalomes_results_ENDO_CS_Up_filtered <- Signalomes(KSR=L6.matrices_Up_CS_filte
                                                      exprsMat=L6.phos.std_Up, module_res = 8,threskinaseNetwork= 0.95,
                                                      signalomeCutoff = 0.5, KOI = "SRC", verbose = T)
 
-cairo_pdf("C:/Users/vahcan/OneDrive - Danmarks Tekniske Universitet/DMKN Manuscript/Figures/Phospho and KSEA/Signalomes_results_ENDO_CS_Up_filtered.pdf", width = 8, height = 8)
-print(Signalomes(KSR=L6.matrices_Up_CS_filter, 
-                 predMatrix=filtered_L6.pred_matrix, filter =T,
-                 exprsMat=L6.phos.std_Up, module_res = 8,threskinaseNetwork= 0.95,
-                 signalomeCutoff = 0.5, KOI = "SRC", verbose = F))
-dev.off()
+
 
 module_inlcuding_proteins = process_signalomes_results_without_converting(Signalomes_results_ENDO_CS_Up_filtered)
 
@@ -457,7 +451,7 @@ annotate_with_clusters <- function(row) {
     } else {
       return(phosphosite)
     }
-  })
+  })F
   return(paste(clusters, collapse = ", "))
 }
 
