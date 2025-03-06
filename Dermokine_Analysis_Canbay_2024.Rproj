@@ -1,0 +1,27 @@
+               _                                
+platform       x86_64-w64-mingw32               
+arch           x86_64                           
+os             mingw32                          
+crt            ucrt                             
+system         x86_64, mingw32                  
+status                                          
+major          4                                
+minor          3.2                              
+year           2023                             
+month          10                               
+day            31                               
+svn rev        85441                            
+language       R                                
+version.string R version 4.3.2 (2023-10-31 ucrt)
+nickname       Eye Holes    
+
+ packages
+ [1] "ggplot2"              "dplyr"                "tidyverse"            "tidyr"                "ggupset"              "corrplot"             "ggvenn"               "limma"               
+ [9] "graphics"             "directPA"             "reactome.db"          "org.Hs.eg.db"         "SummarizedExperiment" "PhosR"                "calibrate"            "ggpubr"              
+[17] "GGally"               "network"              "annotate"             "stats4"               "methods"              "datasets"             "gridExtra"            "venn"                
+[25] "UpSetR"               "grid"                 "reshape2"             "extrafont"            "PerformanceAnalytics" "xts"                  "zoo"                  "ClueR"               
+[33] "parallel"             "e1071"                "lubridate"            "forcats"              "stringr"              "purrr"                "readr"                "tibble"              
+[41] "GenomicRanges"        "GenomeInfoDb"         "MatrixGenerics"       "matrixStats"          "XML"                  "AnnotationDbi"        "IRanges"              "S4Vectors"           
+[49] "Biobase"              "BiocGenerics"         "stats4"               "calibrate"            "MASS"                 "svglite"              "pheatmap"             "ggplotify"           
+[57] "doParallel"           "enrichplot"           "clusterProfiler"      "ggrepel"              "devtools"             "volcano3D"            "edgeR"                "RColorBrewer"        
+[65] "readxl"               "ggVennDiagram"        "ggbeeswarm"           "rlang"                "xtable"              
