@@ -1,6 +1,6 @@
-# Multi-omics analysis of keratinocytes reveals dermokine-dependent regulation of cell-cell adhesion via p120
+# Multiomics analysis reveals dermokine as a regulator of keratinocyte differentiation and adhesion
 
-Code to accompany manuscript of Canbay et al. 2024 (in review)
+Code to accompany manuscript of Canbay et al. 2026 (JCI Insight)
 
 The repository is organised as follows:
 
